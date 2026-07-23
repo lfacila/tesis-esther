@@ -19,7 +19,7 @@ EXCEL_FILE = os.path.join(BASE_DIR, "CRD_Tesis_Cardiorrenal.xlsx")
 model = genai.GenerativeModel('gemini-1.5-flash')
 
 st.set_page_config(page_title="CRD Tesis - Ingreso de Datos", layout="wide")
-st.title("🩺 Extracción Inteligente y Formulario (V2)")
+st.title("Tesis Esther Tamarit")
 
 # --- DICCIONARIO DE VARIABLES ---
 claves_por_defecto = {
