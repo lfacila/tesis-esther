@@ -195,7 +195,7 @@ with col_der:
         c10.text_input("NT-proBNP día prueba", key="nt_prueba")
         c11.selectbox("Edemas activos", ["Sí", "No"], key="edemas_prueba")
 
-    with tab4:
+   with tab4:
         st.markdown("**Tratamiento Médico**")
         c1, c2, c3, c4 = st.columns(4)
         c1.selectbox("IECAs/ARAs", ["Sí", "No"], key="ieca")
