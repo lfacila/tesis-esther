@@ -317,6 +317,46 @@ def set_date_widget_state(key, value):
     st.session_state[_date_widget_key(key)] = parse_date_value(value)
 
 
+def sync_widgets_to_data():
+    """Copy the currently rendered widget values into the persistent patient draft.
+
+    Streamlit may discard widget state when a widget is not rendered on a rerun.
+    The plain clinical keys are therefore the source of truth. Before any save,
+    copy every existing UI value into those persistent keys so no edited field is
+    lost, even when the user has moved between sections.
+    """
+    for key in DEFAULTS:
+        if key in DATE_FIELDS:
+            wk = _date_widget_key(key)
+            if wk in st.session_state:
+                selected = st.session_state.get(wk)
+                st.session_state[key] = selected.isoformat() if selected else ""
+        else:
+            wk = _widget_key(key)
+            if wk in st.session_state:
+                st.session_state[key] = st.session_state.get(wk, DEFAULTS.get(key, ""))
+
+
+def sync_data_to_widgets():
+    """Rebuild widget mirrors from the persistent patient draft after load/save/new."""
+    for key in DEFAULTS:
+        if key in DATE_FIELDS:
+            set_date_widget_state(key, st.session_state.get(key, ""))
+        else:
+            st.session_state[_widget_key(key)] = st.session_state.get(key, DEFAULTS.get(key, ""))
+
+
+def _sync_widget_callback(key, extra_callback=None, extra_args=()):
+    """Persist a widget value before running any field-specific callback."""
+    if key in DATE_FIELDS:
+        selected = st.session_state.get(_date_widget_key(key))
+        st.session_state[key] = selected.isoformat() if selected else ""
+    else:
+        st.session_state[key] = st.session_state.get(_widget_key(key), DEFAULTS.get(key, ""))
+    if extra_callback is not None:
+        extra_callback(*(extra_args or ()))
+
+
 def persistent_text_input(label, key, disabled=False, container=None, on_change=None, args=None, **kwargs):
     target = container if container is not None else st
     wk = _widget_key(key)
@@ -326,8 +366,8 @@ def persistent_text_input(label, key, disabled=False, container=None, on_change=
         widget_label(label, key),
         key=wk,
         disabled=disabled,
-        on_change=on_change,
-        args=args or (),
+        on_change=_sync_widget_callback,
+        args=(key, on_change, tuple(args or ())),
         **kwargs,
     )
     st.session_state[key] = value
@@ -343,8 +383,8 @@ def persistent_text_area(label, key, disabled=False, container=None, on_change=N
         widget_label(label, key),
         key=wk,
         disabled=disabled,
-        on_change=on_change,
-        args=args or (),
+        on_change=_sync_widget_callback,
+        args=(key, on_change, tuple(args or ())),
         **kwargs,
     )
     st.session_state[key] = value
@@ -366,8 +406,8 @@ def persistent_selectbox(label, key, options, disabled=False, container=None, fo
         key=wk,
         disabled=disabled,
         format_func=format_func,
-        on_change=on_change,
-        args=args or (),
+        on_change=_sync_widget_callback,
+        args=(key, on_change, tuple(args or ())),
         **kwargs,
     )
     st.session_state[key] = value
@@ -384,6 +424,8 @@ def date_input_field(label, key, disabled=False, container=None):
         key=wk,
         format="DD/MM/YYYY",
         disabled=disabled,
+        on_change=_sync_widget_callback,
+        args=(key, None, ()),
     )
     st.session_state[key] = selected.isoformat() if selected else ""
     return selected
@@ -643,12 +685,8 @@ def db_load_patient(patient_id):
     data = row.get("data") or {}
     for k in DEFAULTS:
         st.session_state[k] = data.get(k, DEFAULTS[k])
-    for key in DATE_FIELDS:
-        set_date_widget_state(key, st.session_state.get(key, ""))
-    for key in DEFAULTS:
-        if key not in DATE_FIELDS:
-            st.session_state[_widget_key(key)] = st.session_state.get(key, DEFAULTS[key])
-    st.session_state[_widget_key("id_pac")] = normalize_patient_id(patient_id)
+    st.session_state["id_pac"] = normalize_patient_id(patient_id)
+    sync_data_to_widgets()
     st.session_state.id_pac = normalize_patient_id(patient_id)
     st.session_state.form_mode = "edit"
     st.session_state.loaded_patient_id = normalize_patient_id(patient_id)
@@ -669,10 +707,7 @@ def set_ui_message(message, kind="info"):
 def reset_patient_state():
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
-    for key in DATE_FIELDS:
-        set_date_widget_state(key, "")
-    for key, value in DEFAULTS.items():
-        st.session_state[_widget_key(key)] = value
+    sync_data_to_widgets()
     st.session_state.form_mode = "new"
     st.session_state.loaded_patient_id = ""
     st.session_state.loaded_updated_at = ""
@@ -714,6 +749,10 @@ def handle_load_patient():
 
 
 def handle_save_patient():
+    # Critical: persist every currently rendered widget before collecting the payload.
+    # This prevents values from disappearing when the user changed sections and then saved.
+    sync_widgets_to_data()
+    recalculate_derived_fields()
     pid = normalize_patient_id(st.session_state.get("id_pac", ""))
     if not pid:
         set_ui_message("Introduce primero una ID de paciente.", "error")
@@ -721,7 +760,6 @@ def handle_save_patient():
     if st.session_state.form_mode == "new" and st.session_state.id_exists:
         set_ui_message(f"⚠️ El paciente {pid} ya existe en la base de datos. No se ha modificado nada. Pulsa 'Cargar paciente' para editarlo.", "warning")
         return
-    recalculate_derived_fields()
     warnings = validation_warnings()
     st.session_state.validation_errors = warnings
     if warnings:
@@ -731,7 +769,9 @@ def handle_save_patient():
     data["id_pac"] = pid
     try:
         label = db_save_patient(data)
-        set_ui_message(f"Paciente {pid} {label} correctamente en la base central.", "success")
+        # Rebuild UI mirrors from the exact patient draft that has just been saved.
+        sync_data_to_widgets()
+        set_ui_message(f"Paciente {pid} {label} correctamente en la base central. Los datos introducidos se mantienen en el formulario.", "success")
     except Exception as e:
         msg = str(e)
         if msg.startswith("DUPLICADO:"):
