@@ -3,3 +3,4 @@ openpyxl
 supabase
 google-genai
 pandas
+plotly
