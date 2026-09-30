@@ -1,905 +1,618 @@
 import streamlit as st
-import openpyxl
 import json
 import os
 import re
 from datetime import datetime
+from io import BytesIO
+import openpyxl
 
 # ============================================================
-# CONFIGURACIÓN
+# CRD TESIS CARDIORRENAL V3
+# Base central Supabase + exportación Excel
 # ============================================================
 
-st.set_page_config(
-    page_title="CRD Tesis - Ingreso de Datos",
-    layout="wide"
-)
+st.set_page_config(page_title="CRD Tesis Cardiorrenal", layout="wide")
+
+# ---------- Secrets ----------
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Faltan SUPABASE_URL y/o SUPABASE_KEY en los Secrets de Streamlit.")
+    st.stop()
+
+if APP_PASSWORD:
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if not st.session_state.authenticated:
+        st.title("CRD Tesis Cardiorrenal")
+        st.subheader("Acceso")
+        password = st.text_input("Contraseña", type="password")
+        if st.button("Entrar", type="primary"):
+            if password == APP_PASSWORD:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta.")
+        st.stop()
 
 try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    API_KEY = ""
+    from supabase import create_client
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    st.error(f"No se pudo conectar con Supabase: {e}")
+    st.stop()
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_FILE = os.path.join(BASE_DIR, "CRD_Tesis_Cardiorrenal.xlsx")
-
-# Gemini is optional: the manual form still works without it.
-MODEL_NAME = "gemini-1.5-flash"
-
-if API_KEY:
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=API_KEY)
-        model = genai.GenerativeModel(MODEL_NAME)
-    except Exception:
-        model = None
-else:
-    model = None
-
-st.title("Tesis Esther Tamarit")
-st.caption("Registro cardiorrenal · extracción asistida por IA · revisión humana obligatoria")
-
-
-# ============================================================
-# VARIABLES
-# ============================================================
-
-claves_por_defecto = {
-    "id_pac": "",
-    "fecha_inc": datetime.today().strftime("%d/%m/%Y"),
-    "edad": "",
-    "sexo": "",
-    "peso": "",
-    "talla": "",
-    "eti_erc": "",
-    "eti_ic": "",
-    "dm2": "No",
-    "hta": "No",
-    "fa": "No",
-    "epoc": "No",
-    "sd_metab": "No",
-    "tabaco": "No",
-    "enolismo": "No",
-    "hepato": "No",
-
-    "hb": "",
-    "creat": "",
-    "cist_c": "",
-    "fge": "",
-    "urea": "",
-    "ac_urico": "",
-    "prot_creat": "",
-    "ast": "",
-    "alt": "",
-    "plaq": "",
-    "bili_t": "",
-    "bili_d": "",
-    "albumina": "",
-    "hba1c": "",
-    "colest": "",
-    "nt_probnp": "",
-    "ca125": "",
-    "gal3": "",
-    "sst2": "",
-    "gdf15": "",
-    "biobanco": "No",
-
-    "fevi": "",
-    "gls": "",
-    "masa_vi": "",
-    "tapse": "",
-    "vai": "",
-    "vci": "",
-    "lsm": "",
-    "cat_fibro": "",
-    "cap": "",
-    "med_val": "",
-    "iqr_med": "",
-    "dias_desc": "",
-    "nt_prueba": "",
-    "edemas_prueba": "No",
-
-    "ieca": "No",
-    "ara2": "No",
-    "bb": "No",
-    "amr": "No",
-    "sac_val": "No",
-    "sglt2i": "No",
-    "diur_asa": "No",
-    "hctz": "No",
-    "acetazolamida": "No",
-    "estatinas": "No",
-    "epo": "No",
-
-    "meses_seg": "",
-    "m_cv": "No",
-    "f_m_cv": "",
-    "hosp_ic": "No",
-    "f_hosp_ic": "",
-    "iam": "No",
-    "f_iam": "",
-    "acv": "No",
-    "f_acv": "",
-    "m_tot": "No",
-    "f_m_tot": "",
-    "trs": "No",
-    "f_trs": "",
-    "caida_fge": "No",
-    "f_caida_fge": "",
-    "sd_cr": "No",
-    "f_sd_cr": "",
+# ---------- Variables ----------
+DEFAULTS = {
+    "id_pac": "", "fecha_inc": datetime.today().strftime("%d/%m/%Y"),
+    "edad": "", "sexo": "", "peso": "", "talla": "", "eti_erc": "", "eti_ic": "",
+    "dm2": "No", "hta": "No", "fa": "No", "epoc": "No", "sd_metab": "No",
+    "tabaco": "No", "enolismo": "No", "hepato": "No",
+    "hb": "", "creat": "", "cist_c": "", "fge": "", "urea": "", "ac_urico": "",
+    "prot_creat": "", "ast": "", "alt": "", "plaq": "", "bili_t": "", "bili_d": "",
+    "albumina": "", "hba1c": "", "colest": "", "nt_probnp": "", "ca125": "",
+    "gal3": "", "sst2": "", "gdf15": "", "biobanco": "No",
+    "fevi": "", "gls": "", "masa_vi": "", "tapse": "", "vai": "", "vci": "",
+    "lsm": "", "cat_fibro": "", "cap": "", "med_val": "", "iqr_med": "",
+    "dias_desc": "", "nt_prueba": "", "edemas_prueba": "No",
+    "ieca": "No", "ara2": "No", "bb": "No", "amr": "No", "sac_val": "No",
+    "sglt2i": "No", "diur_asa": "No", "hctz": "No", "acetazolamida": "No",
+    "estatinas": "No", "epo": "No",
+    "meses_seg": "", "m_cv": "No", "f_m_cv": "", "hosp_ic": "No",
+    "f_hosp_ic": "", "iam": "No", "f_iam": "", "acv": "No", "f_acv": "",
+    "m_tot": "No", "f_m_tot": "", "trs": "No", "f_trs": "",
+    "caida_fge": "No", "f_caida_fge": "", "sd_cr": "No", "f_sd_cr": ""
 }
-
-# ============================================================
-# UTILIDADES
-# ============================================================
 
 BOOLS = ["Sí", "No"]
 
-def init_state():
-    for key, value in claves_por_defecto.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-def normalizar_si_no(v):
-    if v is None:
-        return v
-    s = str(v).strip().lower()
-    if s in {"si", "sí", "yes", "true"}:
-        return "Sí"
-    if s in {"no", "false"}:
-        return "No"
-    return str(v).strip()
+if "last_ai_data" not in st.session_state:
+    st.session_state.last_ai_data = {}
+if "audit_log" not in st.session_state:
+    st.session_state.audit_log = []
 
-def limpiar_numero(v):
-    """Convierte valores numéricos habituales a string limpio.
-    No intenta interpretar unidades ni hacer conversiones clínicas.
-    """
-    if v is None:
-        return ""
-    s = str(v).strip()
-    if not s:
-        return ""
-    s = s.replace(",", ".")
-    # Elimina espacios, pero no fuerza conversiones clínicas.
-    s = re.sub(r"\s+", "", s)
-    return s
 
-def es_numero(v):
+# ============================================================
+# DATABASE
+# ============================================================
+
+def db_get_patient(patient_id):
+    res = supabase.table("patients").select("*").eq("id_pac", patient_id).limit(1).execute()
+    if not res.data:
+        return None
+    return res.data[0]
+
+def db_count():
+    res = supabase.table("patients").select("id_pac", count="exact").execute()
+    return res.count if res.count is not None else len(res.data or [])
+
+def db_upsert_patient(data):
+    patient_id = str(data["id_pac"]).strip()
+    now = datetime.now().isoformat()
+
+    old = db_get_patient(patient_id)
+    payload = {
+        "id_pac": patient_id,
+        "data": data,
+        "updated_at": now,
+        "updated_by": st.session_state.get("user_label", "usuario")
+    }
+
+    res = supabase.table("patients").upsert(payload, on_conflict="id_pac").execute()
+
+    # Audit record: store complete snapshot + timestamp.
+    supabase.table("audit_log").insert({
+        "id_pac": patient_id,
+        "action": "UPDATE" if old else "CREATE",
+        "snapshot": data,
+        "changed_at": now,
+        "changed_by": st.session_state.get("user_label", "usuario")
+    }).execute()
+
+    return bool(res.data), ("actualizado" if old else "nuevo")
+
+def db_load_patient(patient_id):
+    row = db_get_patient(patient_id)
+    if not row:
+        return False
+
+    data = row.get("data") or {}
+    for k in DEFAULTS:
+        st.session_state[k] = data.get(k, DEFAULTS[k])
+
+    st.session_state.id_pac = patient_id
+    st.session_state.loaded_updated_at = row.get("updated_at", "")
+    return True
+
+def db_recent(limit=20):
+    return supabase.table("patients").select(
+        "id_pac,updated_at,updated_by"
+    ).order("updated_at", desc=True).limit(limit).execute().data or []
+
+def db_audit(patient_id, limit=20):
+    return supabase.table("audit_log").select(
+        "id_pac,action,changed_at,changed_by"
+    ).eq("id_pac", patient_id).order(
+        "changed_at", desc=True
+    ).limit(limit).execute().data or []
+
+
+# ============================================================
+# VALIDACIÓN
+# ============================================================
+
+def is_number(v):
     try:
         float(str(v).replace(",", "."))
         return True
     except Exception:
         return False
 
-def validar_rangos():
-    """Devuelve advertencias. No modifica datos."""
+def validation_warnings():
     warnings = []
-
-    rangos = {
-        "edad": (0, 120),
-        "peso": (1, 500),
-        "talla": (30, 250),
-        "hb": (1, 30),
-        "creat": (0.1, 30),
-        "fge": (0, 200),
-        "fevi": (0, 100),
-        "tapse": (0, 50),
-        "lsm": (0, 100),
-        "cap": (0, 1000),
-        "meses_seg": (0, 120),
-        "plaq": (1, 2000),
+    ranges = {
+        "edad": (0, 120), "peso": (1, 500), "talla": (30, 250),
+        "hb": (1, 30), "creat": (0.1, 30), "fge": (0, 200),
+        "fevi": (0, 100), "tapse": (0, 50), "lsm": (0, 100),
+        "cap": (0, 1000), "plaq": (1, 2000), "meses_seg": (0, 120)
     }
-
-    for key, (lo, hi) in rangos.items():
-        value = st.session_state.get(key, "")
-        if value not in ("", None) and es_numero(value):
-            x = float(str(value).replace(",", "."))
+    for key, (lo, hi) in ranges.items():
+        v = st.session_state.get(key, "")
+        if v not in ("", None) and is_number(v):
+            x = float(str(v).replace(",", "."))
             if x < lo or x > hi:
-                warnings.append(
-                    f"{key}: valor {value} fuera del rango de comprobación ({lo}–{hi})."
-                )
-
+                warnings.append(f"{key}: {v} fuera del rango de comprobación ({lo}–{hi}).")
     return warnings
-
-
-# ============================================================
-# ESTADO
-# ============================================================
-
-init_state()
-
-if "last_ai_data" not in st.session_state:
-    st.session_state.last_ai_data = {}
-
-if "audit_log" not in st.session_state:
-    st.session_state.audit_log = []
-
-
-# ============================================================
-# EXCEL
-# ============================================================
-
-def encontrar_fila(ws, id_buscado):
-    id_buscado = str(id_buscado).strip()
-
-    # Buscar primero un ID existente.
-    for r in range(2, ws.max_row + 1):
-        val = ws.cell(row=r, column=1).value
-        if val is not None and str(val).strip() == id_buscado:
-            return r, True
-
-    # Después buscar primera fila vacía.
-    for r in range(2, ws.max_row + 100):
-        val = ws.cell(row=r, column=1).value
-        if val is None or str(val).strip() == "":
-            return r, False
-
-    return ws.max_row + 1, False
-
-
-def cargar_paciente(id_buscado):
-    if not os.path.exists(EXCEL_FILE):
-        return False
-
-    wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
-
-    if "01_Datos_Clinicos" not in wb.sheetnames:
-        return False
-
-    ws_clin = wb["01_Datos_Clinicos"]
-    fila_obj = None
-
-    for r in range(2, ws_clin.max_row + 1):
-        if str(ws_clin.cell(row=r, column=1).value).strip() == str(id_buscado).strip():
-            fila_obj = r
-            break
-
-    if not fila_obj:
-        return False
-
-    def get_val(ws_name, col):
-        v = wb[ws_name].cell(row=fila_obj, column=col).value
-        return "" if v is None else str(v).strip()
-
-    mapping = {
-        "fecha_inc": ("01_Datos_Clinicos", 2),
-        "edad": ("01_Datos_Clinicos", 3),
-        "sexo": ("01_Datos_Clinicos", 4),
-        "peso": ("01_Datos_Clinicos", 5),
-        "talla": ("01_Datos_Clinicos", 6),
-        "eti_erc": ("01_Datos_Clinicos", 8),
-        "eti_ic": ("01_Datos_Clinicos", 9),
-        "dm2": ("01_Datos_Clinicos", 10),
-        "hta": ("01_Datos_Clinicos", 11),
-        "fa": ("01_Datos_Clinicos", 12),
-        "epoc": ("01_Datos_Clinicos", 13),
-        "sd_metab": ("01_Datos_Clinicos", 14),
-        "tabaco": ("01_Datos_Clinicos", 15),
-        "enolismo": ("01_Datos_Clinicos", 16),
-        "hepato": ("01_Datos_Clinicos", 17),
-
-        "hb": ("02_Analitica_Biomarcadores", 2),
-        "creat": ("02_Analitica_Biomarcadores", 3),
-        "cist_c": ("02_Analitica_Biomarcadores", 4),
-        "fge": ("02_Analitica_Biomarcadores", 5),
-        "urea": ("02_Analitica_Biomarcadores", 6),
-        "ac_urico": ("02_Analitica_Biomarcadores", 7),
-        "prot_creat": ("02_Analitica_Biomarcadores", 8),
-        "ast": ("02_Analitica_Biomarcadores", 9),
-        "alt": ("02_Analitica_Biomarcadores", 10),
-        "plaq": ("02_Analitica_Biomarcadores", 11),
-        "bili_t": ("02_Analitica_Biomarcadores", 13),
-        "bili_d": ("02_Analitica_Biomarcadores", 14),
-        "albumina": ("02_Analitica_Biomarcadores", 15),
-        "hba1c": ("02_Analitica_Biomarcadores", 16),
-        "colest": ("02_Analitica_Biomarcadores", 17),
-        "nt_probnp": ("02_Analitica_Biomarcadores", 18),
-        "ca125": ("02_Analitica_Biomarcadores", 19),
-        "gal3": ("02_Analitica_Biomarcadores", 20),
-        "sst2": ("02_Analitica_Biomarcadores", 21),
-        "gdf15": ("02_Analitica_Biomarcadores", 22),
-        "biobanco": ("02_Analitica_Biomarcadores", 23),
-
-        "fevi": ("03_Eco_Elastografia", 2),
-        "gls": ("03_Eco_Elastografia", 3),
-        "masa_vi": ("03_Eco_Elastografia", 4),
-        "tapse": ("03_Eco_Elastografia", 5),
-        "vai": ("03_Eco_Elastografia", 6),
-        "vci": ("03_Eco_Elastografia", 7),
-        "lsm": ("03_Eco_Elastografia", 8),
-        "cat_fibro": ("03_Eco_Elastografia", 9),
-        "cap": ("03_Eco_Elastografia", 10),
-        "med_val": ("03_Eco_Elastografia", 11),
-        "iqr_med": ("03_Eco_Elastografia", 12),
-        "dias_desc": ("03_Eco_Elastografia", 13),
-        "nt_prueba": ("03_Eco_Elastografia", 14),
-        "edemas_prueba": ("03_Eco_Elastografia", 15),
-
-        "ieca": ("04_Tratamiento", 2),
-        "ara2": ("04_Tratamiento", 3),
-        "bb": ("04_Tratamiento", 4),
-        "amr": ("04_Tratamiento", 5),
-        "sac_val": ("04_Tratamiento", 6),
-        "sglt2i": ("04_Tratamiento", 7),
-        "diur_asa": ("04_Tratamiento", 8),
-        "hctz": ("04_Tratamiento", 9),
-        "acetazolamida": ("04_Tratamiento", 10),
-        "estatinas": ("04_Tratamiento", 11),
-        "epo": ("04_Tratamiento", 12),
-
-        "meses_seg": ("05_Seguimiento_24m", 2),
-        "m_cv": ("05_Seguimiento_24m", 3),
-        "f_m_cv": ("05_Seguimiento_24m", 4),
-        "hosp_ic": ("05_Seguimiento_24m", 5),
-        "f_hosp_ic": ("05_Seguimiento_24m", 6),
-        "iam": ("05_Seguimiento_24m", 7),
-        "f_iam": ("05_Seguimiento_24m", 8),
-        "acv": ("05_Seguimiento_24m", 9),
-        "f_acv": ("05_Seguimiento_24m", 10),
-        "m_tot": ("05_Seguimiento_24m", 12),
-        "f_m_tot": ("05_Seguimiento_24m", 13),
-        "trs": ("05_Seguimiento_24m", 14),
-        "f_trs": ("05_Seguimiento_24m", 15),
-        "caida_fge": ("05_Seguimiento_24m", 16),
-        "f_caida_fge": ("05_Seguimiento_24m", 17),
-        "sd_cr": ("05_Seguimiento_24m", 18),
-        "f_sd_cr": ("05_Seguimiento_24m", 19),
-    }
-
-    for key, (sheet, col) in mapping.items():
-        st.session_state[key] = get_val(sheet, col)
-
-    st.session_state.id_pac = str(id_buscado).strip()
-    return True
-
-
-def guardar_registro():
-    if not st.session_state.id_pac:
-        return False, "El ID de Paciente es obligatorio."
-
-    if not os.path.exists(EXCEL_FILE):
-        return False, f"No se encuentra {EXCEL_FILE}."
-
-    warnings = validar_rangos()
-    if warnings:
-        return False, "Hay valores que deben revisarse antes de guardar."
-
-    try:
-        wb = openpyxl.load_workbook(EXCEL_FILE)
-        s = st.session_state
-
-        # Guardado específico por columnas: preserva las columnas no tocadas,
-        # incluyendo posibles fórmulas/formato del libro.
-        sheets_data = {
-            "01_Datos_Clinicos": [
-                (1, s.id_pac), (2, s.fecha_inc), (3, s.edad), (4, s.sexo),
-                (5, s.peso), (6, s.talla), (8, s.eti_erc), (9, s.eti_ic),
-                (10, s.dm2), (11, s.hta), (12, s.fa), (13, s.epoc),
-                (14, s.sd_metab), (15, s.tabaco), (16, s.enolismo), (17, s.hepato)
-            ],
-            "02_Analitica_Biomarcadores": [
-                (1, s.id_pac), (2, s.hb), (3, s.creat), (4, s.cist_c),
-                (5, s.fge), (6, s.urea), (7, s.ac_urico), (8, s.prot_creat),
-                (9, s.ast), (10, s.alt), (11, s.plaq), (13, s.bili_t),
-                (14, s.bili_d), (15, s.albumina), (16, s.hba1c),
-                (17, s.colest), (18, s.nt_probnp), (19, s.ca125),
-                (20, s.gal3), (21, s.sst2), (22, s.gdf15), (23, s.biobanco)
-            ],
-            "03_Eco_Elastografia": [
-                (1, s.id_pac), (2, s.fevi), (3, s.gls), (4, s.masa_vi),
-                (5, s.tapse), (6, s.vai), (7, s.vci), (8, s.lsm),
-                (9, s.cat_fibro), (10, s.cap), (11, s.med_val),
-                (12, s.iqr_med), (13, s.dias_desc), (14, s.nt_prueba),
-                (15, s.edemas_prueba)
-            ],
-            "04_Tratamiento": [
-                (1, s.id_pac), (2, s.ieca), (3, s.ara2), (4, s.bb),
-                (5, s.amr), (6, s.sac_val), (7, s.sglt2i), (8, s.diur_asa),
-                (9, s.hctz), (10, s.acetazolamida), (11, s.estatinas), (12, s.epo)
-            ],
-            "05_Seguimiento_24m": [
-                (1, s.id_pac), (2, s.meses_seg), (3, s.m_cv), (4, s.f_m_cv),
-                (5, s.hosp_ic), (6, s.f_hosp_ic), (7, s.iam), (8, s.f_iam),
-                (9, s.acv), (10, s.f_acv), (12, s.m_tot), (13, s.f_m_tot),
-                (14, s.trs), (15, s.f_trs), (16, s.caida_fge),
-                (17, s.f_caida_fge), (18, s.sd_cr), (19, s.f_sd_cr)
-            ]
-        }
-
-        existence = None
-        for sheet_name, data in sheets_data.items():
-            ws = wb[sheet_name]
-            fila, existe = encontrar_fila(ws, s.id_pac)
-            if existence is None:
-                existence = existe
-
-            for col, val in data:
-                ws.cell(row=fila, column=col, value=val)
-
-        wb.save(EXCEL_FILE)
-
-        return True, (
-            f"Paciente {s.id_pac} "
-            + ("ACTUALIZADO correctamente." if existence else "NUEVO guardado correctamente.")
-        )
-
-    except PermissionError:
-        return False, "No se puede guardar el Excel. Comprueba que no esté abierto en Excel."
-    except Exception as e:
-        return False, f"Error inesperado al guardar: {e}"
 
 
 # ============================================================
 # IA
 # ============================================================
 
-AI_SCHEMA = {
-    "id_pac": "string",
-    "edad": "number",
-    "sexo": "H|M",
-    "peso": "number",
-    "talla": "number",
-    "eti_erc": "DM2|HTA|Glomerulonefritis|Poliquistosis|Otras",
-    "eti_ic": "Isquémica|Hipertensiva|MCD|HFpEF|Valvular",
+AI_KEYS = list(DEFAULTS.keys())
 
-    "dm2": "Sí|No",
-    "hta": "Sí|No",
-    "fa": "Sí|No",
-    "epoc": "Sí|No",
-    "sd_metab": "Sí|No",
-    "tabaco": "Sí|No",
-    "enolismo": "Sí|No",
-    "hepato": "Sí|No",
+AI_SCHEMA = {k: "valor explícito o null" for k in AI_KEYS}
+for k in ["dm2","hta","fa","epoc","sd_metab","tabaco","enolismo","hepato",
+          "biobanco","edemas_prueba","ieca","ara2","bb","amr","sac_val",
+          "sglt2i","diur_asa","hctz","acetazolamida","estatinas","epo",
+          "m_cv","hosp_ic","iam","acv","m_tot","trs","caida_fge","sd_cr"]:
+    AI_SCHEMA[k] = "Sí|No|null"
 
-    "hb": "number",
-    "creat": "number",
-    "cist_c": "number",
-    "fge": "number",
-    "urea": "number",
-    "ac_urico": "number",
-    "prot_creat": "number",
-    "ast": "number",
-    "alt": "number",
-    "plaq": "number",
-    "bili_t": "number",
-    "bili_d": "number",
-    "albumina": "number",
-    "hba1c": "number",
-    "colest": "number",
-    "nt_probnp": "number",
-    "ca125": "number",
-    "gal3": "number",
-    "sst2": "number",
-    "gdf15": "number",
-    "biobanco": "Sí|No",
+def normalize_yes_no(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("si", "sí", "yes", "true"):
+        return "Sí"
+    if s in ("no", "false"):
+        return "No"
+    return str(v).strip()
 
-    "fevi": "number",
-    "gls": "number",
-    "masa_vi": "number",
-    "tapse": "number",
-    "vai": "number",
-    "vci": "number",
-    "lsm": "number",
-    "cat_fibro": "string",
-    "cap": "number",
-    "med_val": "number",
-    "iqr_med": "number|string",
-    "dias_desc": "number",
-    "nt_prueba": "number",
-    "edemas_prueba": "Sí|No",
-
-    "ieca": "Sí|No",
-    "ara2": "Sí|No",
-    "bb": "Sí|No",
-    "amr": "Sí|No",
-    "sac_val": "Sí|No",
-    "sglt2i": "Sí|No",
-    "diur_asa": "Sí|No",
-    "hctz": "Sí|No",
-    "acetazolamida": "Sí|No",
-    "estatinas": "Sí|No",
-    "epo": "Sí|No",
-
-    "meses_seg": "number",
-    "m_cv": "Sí|No",
-    "f_m_cv": "DD/MM/AAAA",
-    "hosp_ic": "Sí|No",
-    "f_hosp_ic": "DD/MM/AAAA",
-    "iam": "Sí|No",
-    "f_iam": "DD/MM/AAAA",
-    "acv": "Sí|No",
-    "f_acv": "DD/MM/AAAA",
-    "m_tot": "Sí|No",
-    "f_m_tot": "DD/MM/AAAA",
-    "trs": "Sí|No",
-    "f_trs": "DD/MM/AAAA",
-    "caida_fge": "Sí|No",
-    "f_caida_fge": "DD/MM/AAAA",
-    "sd_cr": "Sí|No",
-    "f_sd_cr": "DD/MM/AAAA",
-}
-
-
-def extraer_datos(texto):
-    if model is None:
-        st.error("Gemini no está configurado. Añade GEMINI_API_KEY en st.secrets.")
+def extract_ai(texto):
+    try:
+        import google.generativeai as genai
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+        if not api_key:
+            st.error("Falta GEMINI_API_KEY en los Secrets.")
+            return None
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+    except Exception as e:
+        st.error(f"No se pudo iniciar Gemini: {e}")
         return None
 
     prompt = f"""
 Eres un extractor de datos clínicos para una base de investigación cardiorrenal.
 
-OBJETIVO:
-Extraer exclusivamente información explícitamente presente en el texto clínico.
+Extrae EXCLUSIVAMENTE información explícitamente presente en el texto.
 NO inventes datos.
+NO infieras datos.
 NO completes campos por conocimiento médico.
-NO infieras una variable porque otra variable la haga probable.
-Si un dato no aparece, devuelve null.
-Si existe duda, devuelve null.
+Si no aparece un dato, devuelve null.
+Si hay duda, devuelve null.
 
-REGLAS:
-1. Mantén exactamente las unidades y el valor numérico encontrado.
-2. No conviertas unidades salvo que la conversión esté explícitamente indicada.
-3. Para Sí/No, sólo usa Sí cuando el texto lo documente claramente y No cuando esté documentado como ausente/negado.
-4. Si aparece un tratamiento, marca el correspondiente Sí/No sólo si está explícitamente documentado.
-5. Las fechas deben conservarse como DD/MM/AAAA cuando sea posible.
-6. MUY IMPORTANTE: NO conviertas LSM en fibrosis.
-7. NO asignes cat_fibro a partir de LSM. Si el texto proporciona una categoría explícita, extráela; si no, null.
-8. No confundas antecedentes con eventos ocurridos durante el seguimiento.
-9. Devuelve ÚNICAMENTE JSON válido. Sin markdown. Sin explicaciones.
+Reglas:
+- Mantén los valores numéricos tal como aparecen.
+- No hagas conversiones de unidades.
+- Para Sí/No exige evidencia textual.
+- No confundas antecedentes con eventos de seguimiento.
+- NO conviertas LSM en fibrosis.
+- NO asignes cat_fibro a partir de LSM. Sólo extrae una categoría si aparece explícitamente.
+- Devuelve únicamente JSON válido, sin markdown.
 
-ESQUEMA:
-{json.dumps(AI_SCHEMA, ensure_ascii=False, indent=2)}
+Claves permitidas:
+{json.dumps(AI_SCHEMA, ensure_ascii=False)}
 
-TEXTO CLÍNICO:
+Texto clínico:
 {texto}
 """
-
     try:
-        res = model.generate_content(prompt)
-        raw = res.text.strip()
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
         raw = re.sub(r"^```json\s*", "", raw, flags=re.I)
         raw = re.sub(r"\s*```$", "", raw)
-
         data = json.loads(raw)
-
-        # Sólo aceptamos claves conocidas.
-        data = {k: v for k, v in data.items() if k in claves_por_defecto}
-
-        return data
-
+        return {k: v for k, v in data.items() if k in DEFAULTS}
     except Exception as e:
-        st.error(f"No se pudo interpretar la respuesta de la IA: {e}")
+        st.error(f"Error interpretando la respuesta de Gemini: {e}")
         return None
 
-
-def aplicar_datos_ia(datos):
-    cambios = []
-
-    for k, v in datos.items():
-        if k not in claves_por_defecto or v is None:
+def apply_ai(data):
+    changes = []
+    for k, v in data.items():
+        if k not in DEFAULTS or v is None or str(v).strip() == "":
             continue
-
-        if isinstance(v, str):
-            v = v.strip()
-
-        if v == "":
-            continue
-
         if k in {
-            "dm2", "hta", "fa", "epoc", "sd_metab", "tabaco", "enolismo",
-            "hepato", "biobanco", "edemas_prueba", "ieca", "ara2", "bb",
-            "amr", "sac_val", "sglt2i", "diur_asa", "hctz", "acetazolamida",
-            "estatinas", "epo", "m_cv", "hosp_ic", "iam", "acv", "m_tot",
-            "trs", "caida_fge", "sd_cr"
+            "dm2","hta","fa","epoc","sd_metab","tabaco","enolismo","hepato",
+            "biobanco","edemas_prueba","ieca","ara2","bb","amr","sac_val",
+            "sglt2i","diur_asa","hctz","acetazolamida","estatinas","epo",
+            "m_cv","hosp_ic","iam","acv","m_tot","trs","caida_fge","sd_cr"
         }:
-            v = normalizar_si_no(v)
-
+            v = normalize_yes_no(v)
         elif isinstance(v, (int, float)):
             v = str(v)
-
         else:
-            v = limpiar_numero(v) if k not in {
-                "id_pac", "sexo", "eti_erc", "eti_ic", "cat_fibro",
-                "f_m_cv", "f_hosp_ic", "f_iam", "f_acv", "f_m_tot",
-                "f_trs", "f_caida_fge", "f_sd_cr"
-            } else str(v).strip()
+            v = str(v).strip()
 
         old = st.session_state.get(k, "")
         if str(old) != str(v):
-            cambios.append((k, old, v))
+            changes.append((k, old, v))
             st.session_state[k] = v
 
-    st.session_state.last_ai_data = datos
-    st.session_state.audit_log.append({
-        "fecha": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-        "accion": "IA",
-        "cambios": cambios
-    })
-
-    return cambios
+    st.session_state.last_ai_data = data
+    return changes
 
 
 # ============================================================
-# INTERFAZ
+# EXPORTACIÓN EXCEL DESDE LA BASE CENTRAL
+# ============================================================
+
+SHEETS = {
+    "01_Datos_Clinicos": [
+        (1,"id_pac"),(2,"fecha_inc"),(3,"edad"),(4,"sexo"),(5,"peso"),(6,"talla"),
+        (8,"eti_erc"),(9,"eti_ic"),(10,"dm2"),(11,"hta"),(12,"fa"),(13,"epoc"),
+        (14,"sd_metab"),(15,"tabaco"),(16,"enolismo"),(17,"hepato")
+    ],
+    "02_Analitica_Biomarcadores": [
+        (1,"id_pac"),(2,"hb"),(3,"creat"),(4,"cist_c"),(5,"fge"),(6,"urea"),
+        (7,"ac_urico"),(8,"prot_creat"),(9,"ast"),(10,"alt"),(11,"plaq"),
+        (13,"bili_t"),(14,"bili_d"),(15,"albumina"),(16,"hba1c"),(17,"colest"),
+        (18,"nt_probnp"),(19,"ca125"),(20,"gal3"),(21,"sst2"),(22,"gdf15"),
+        (23,"biobanco")
+    ],
+    "03_Eco_Elastografia": [
+        (1,"id_pac"),(2,"fevi"),(3,"gls"),(4,"masa_vi"),(5,"tapse"),(6,"vai"),
+        (7,"vci"),(8,"lsm"),(9,"cat_fibro"),(10,"cap"),(11,"med_val"),
+        (12,"iqr_med"),(13,"dias_desc"),(14,"nt_prueba"),(15,"edemas_prueba")
+    ],
+    "04_Tratamiento": [
+        (1,"id_pac"),(2,"ieca"),(3,"ara2"),(4,"bb"),(5,"amr"),(6,"sac_val"),
+        (7,"sglt2i"),(8,"diur_asa"),(9,"hctz"),(10,"acetazolamida"),
+        (11,"estatinas"),(12,"epo")
+    ],
+    "05_Seguimiento_24m": [
+        (1,"id_pac"),(2,"meses_seg"),(3,"m_cv"),(4,"f_m_cv"),(5,"hosp_ic"),
+        (6,"f_hosp_ic"),(7,"iam"),(8,"f_iam"),(9,"acv"),(10,"f_acv"),
+        (12,"m_tot"),(13,"f_m_tot"),(14,"trs"),(15,"f_trs"),(16,"caida_fge"),
+        (17,"f_caida_fge"),(18,"sd_cr"),(19,"f_sd_cr")
+    ]
+}
+
+def export_all_excel():
+    rows = supabase.table("patients").select("id_pac,data").order("id_pac").execute().data or []
+    wb = openpyxl.Workbook()
+    first = True
+
+    for sheet_name, mapping in SHEETS.items():
+        if first:
+            ws = wb.active
+            ws.title = sheet_name
+            first = False
+        else:
+            ws = wb.create_sheet(sheet_name)
+
+        max_col = max(c for c,_ in mapping)
+        for col, key in mapping:
+            ws.cell(row=1, column=col, value=key)
+
+        for r_idx, row in enumerate(rows, start=2):
+            data = row.get("data") or {}
+            for col, key in mapping:
+                ws.cell(row=r_idx, column=col, value=data.get(key, ""))
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue(), len(rows)
+
+
+# ============================================================
+# CABECERA
+# ============================================================
+
+st.title("Tesis Esther Tamarit · Base Cardiorrenal")
+
+count = db_count()
+recent = db_recent(1)
+last_update = recent[0]["updated_at"] if recent else "—"
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Pacientes en la base", count)
+m2.metric("Base central", "SUPABASE")
+m3.metric("Última actualización", last_update[:19].replace("T", " ") if last_update != "—" else "—")
+m4.metric("Estado", "🟢 ONLINE")
+
+st.info(
+    "Esta aplicación utiliza una base central. Cualquier Mac, Windows o navegador "
+    "que entre en esta misma aplicación trabaja sobre los mismos datos."
+)
+
+
+# ============================================================
+# BUSCADOR
+# ============================================================
+
+top1, top2, top3 = st.columns([1.5, 1, 1])
+
+with top1:
+    search_id = st.text_input("ID paciente", value=st.session_state.get("id_pac",""))
+
+with top2:
+    if st.button("🔍 Cargar paciente", use_container_width=True):
+        if search_id.strip():
+            if db_load_patient(search_id.strip()):
+                st.success("Paciente cargado desde la base central.")
+                st.rerun()
+            else:
+                st.warning("Ese ID no existe. Puedes crear un paciente nuevo.")
+
+with top3:
+    if st.button("🔄 Nuevo paciente", use_container_width=True):
+        for k, v in DEFAULTS.items():
+            st.session_state[k] = v
+        st.session_state.last_ai_data = {}
+        st.rerun()
+
+
+# ============================================================
+# HISTORIA + IA
 # ============================================================
 
 col_izq, col_der = st.columns([1, 2])
 
 with col_izq:
-    st.subheader("1. Pegar Evolución / Historia")
-    texto_input = st.text_area(
-        "Pega aquí los datos en texto plano:",
-        height=350,
-        key="texto_clinico"
-    )
+    st.subheader("1. Evolución / Historia")
+    texto = st.text_area("Pega aquí el texto clínico", height=350)
 
-    if st.button(
-        "🧠 Auto-completar formulario",
-        type="primary",
-        use_container_width=True
-    ):
-        if not texto_input.strip():
-            st.warning("Pega un texto primero.")
+    if st.button("🧠 Auto-completar con IA", type="primary", use_container_width=True):
+        if not texto.strip():
+            st.warning("Pega primero el texto clínico.")
         else:
-            with st.spinner("Extrayendo datos clínicos..."):
-                datos_ia = extraer_datos(texto_input)
-
-            if datos_ia:
-                cambios = aplicar_datos_ia(datos_ia)
-                st.success(
-                    f"Extracción completada. Se han propuesto {len(cambios)} cambios. "
-                    "REVISA EL FORMULARIO antes de guardar."
-                )
+            with st.spinner("Extrayendo datos..."):
+                result = extract_ai(texto)
+            if result:
+                changes = apply_ai(result)
+                st.success(f"Extracción completada: {len(changes)} campos propuestos.")
                 st.rerun()
 
     if st.session_state.last_ai_data:
-        st.markdown("### Última extracción IA")
-        st.caption("La IA propone valores; el investigador decide el valor final.")
-        st.json(st.session_state.last_ai_data)
-
-
-with col_der:
-    c_head1, c_head2 = st.columns([2, 1])
-
-    with c_head1:
-        st.subheader("2. Formulario de Datos")
-
-    with c_head2:
-        if st.button("🔄 Nuevo paciente / limpiar", use_container_width=True):
-            for clave, valor in claves_por_defecto.items():
-                st.session_state[clave] = valor
-            st.session_state.last_ai_data = {}
-            st.rerun()
-
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "01. Clínicos",
-        "02. Analítica",
-        "03. Eco/Fibro",
-        "04. Tratamiento",
-        "05. Seguimiento"
-    ])
-
-    with tab1:
-        c1, c2, c3, c4 = st.columns([1.5, 0.7, 1, 1])
-
-        c1.text_input("ID Paciente", key="id_pac")
-
-        with c2:
-            st.write("")
-            if st.button("🔍 Buscar", use_container_width=True):
-                if st.session_state.id_pac:
-                    if cargar_paciente(st.session_state.id_pac):
-                        st.success("Paciente cargado. Modo edición.")
-                        st.rerun()
-                    else:
-                        st.warning("ID no existe. Se guardará como nuevo.")
-                else:
-                    st.warning("Introduce un ID.")
-
-        c3.text_input("Fecha Inclusión", key="fecha_inc")
-        c4.selectbox("Sexo", ["", "H", "M"], key="sexo")
-
-        c5, c6, c7, c8 = st.columns(4)
-        c5.text_input("Edad", key="edad")
-        c6.text_input("Peso (kg)", key="peso")
-        c7.text_input("Talla (cm)", key="talla")
-
-        c8.selectbox(
-            "Etiología ERC",
-            ["", "DM2", "HTA", "Glomerulonefritis", "Poliquistosis", "Otras"],
-            key="eti_erc"
-        )
-
-        c_ic, _ = st.columns([1, 3])
-        c_ic.selectbox(
-            "Etiología IC",
-            ["", "Isquémica", "Hipertensiva", "MCD", "HFpEF", "Valvular"],
-            key="eti_ic"
-        )
-
-        st.markdown("**Comorbilidades adicionales**")
-        c9, c10, c11, c12 = st.columns(4)
-        c9.selectbox("DM2", BOOLS, key="dm2")
-        c10.selectbox("HTA", BOOLS, key="hta")
-        c11.selectbox("FA", BOOLS, key="fa")
-        c12.selectbox("EPOC", BOOLS, key="epoc")
-
-        c13, c14, c15, c16 = st.columns(4)
-        c13.selectbox("Sd. Metab", BOOLS, key="sd_metab")
-        c14.selectbox("Tabaquismo", BOOLS, key="tabaco")
-        c15.selectbox("Enolismo", BOOLS, key="enolismo")
-        c16.selectbox("Hepatopatía", BOOLS, key="hepato")
-
-    with tab2:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.text_input("Hemoglobina", key="hb")
-        c2.text_input("Creatinina", key="creat")
-        c3.text_input("Cistatina C", key="cist_c")
-        c4.text_input("FGe CKD-EPI", key="fge")
-
-        c5, c6, c7, c8 = st.columns(4)
-        c5.text_input("Urea", key="urea")
-        c6.text_input("Ácido úrico", key="ac_urico")
-        c7.text_input("Prot/Creat", key="prot_creat")
-        c8.text_input("Plaquetas", key="plaq")
-
-        c9, c10, c11, c12 = st.columns(4)
-        c9.text_input("AST", key="ast")
-        c10.text_input("ALT", key="alt")
-        c11.text_input("Bilirrubina total", key="bili_t")
-        c12.text_input("Bilirrubina directa", key="bili_d")
-
-        c13, c14, c15, c16 = st.columns(4)
-        c13.text_input("Albúmina", key="albumina")
-        c14.text_input("HbA1c", key="hba1c")
-        c15.text_input("Colesterol", key="colest")
-        c16.selectbox("Muestra a Biobanco", BOOLS, key="biobanco")
-
-        st.markdown("**Biomarcadores**")
-        c17, c18, c19, c20 = st.columns(4)
-        c17.text_input("NT-proBNP", key="nt_probnp")
-        c18.text_input("CA125", key="ca125")
-        c19.text_input("Galectina-3", key="gal3")
-        c20.text_input("sST2", key="sst2")
-
-        c21, c22 = st.columns(2)
-        c21.text_input("GDF-15", key="gdf15")
-
-    with tab3:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.text_input("FEVI (%)", key="fevi")
-        c2.text_input("GLS (%)", key="gls")
-        c3.text_input("Masa VI", key="masa_vi")
-        c4.text_input("TAPSE", key="tapse")
-
-        c5, c6, c7, c8 = st.columns(4)
-        c5.text_input("VAI", key="vai")
-        c6.text_input("VCI", key="vci")
-        c7.text_input("LSM (kPa)", key="lsm")
-        c8.text_input("CAP (dB/m)", key="cap")
-
-        c9, c10, c11, c12 = st.columns(4)
-        c9.text_input("Mediana elastografía", key="med_val")
-        c10.text_input("IQR / IQR-mediana", key="iqr_med")
-        c11.text_input("Días descompensación", key="dias_desc")
-        c12.text_input("NT-proBNP (día prueba)", key="nt_prueba")
-
-        st.markdown("**Interpretación de elastografía**")
-        c13, c14 = st.columns(2)
-        c13.text_input(
-            "Categoría fibrosis (si está explícitamente documentada)",
-            key="cat_fibro"
-        )
-        c14.selectbox("Edemas activos", BOOLS, key="edemas_prueba")
-
-        st.info(
-            "La IA no asigna automáticamente una categoría de fibrosis a partir de la LSM. "
-            "La categoría sólo se conserva si está documentada explícitamente."
-        )
-
-    with tab4:
-        st.markdown("**Tratamiento farmacológico**")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.selectbox("IECA", BOOLS, key="ieca")
-        c2.selectbox("ARA2", BOOLS, key="ara2")
-        c3.selectbox("Betabloqueantes", BOOLS, key="bb")
-        c4.selectbox("AMR", BOOLS, key="amr")
-
-        c5, c6, c7, c8 = st.columns(4)
-        c5.selectbox("SAC/VAL", BOOLS, key="sac_val")
-        c6.selectbox("SGLT2i", BOOLS, key="sglt2i")
-        c7.selectbox("Diurético de asa", BOOLS, key="diur_asa")
-        c8.selectbox("HCTZ", BOOLS, key="hctz")
-
-        c9, c10, c11, _ = st.columns(4)
-        c9.selectbox("Acetazolamida", BOOLS, key="acetazolamida")
-        c10.selectbox("Estatinas", BOOLS, key="estatinas")
-        c11.selectbox("Eritropoyetina", BOOLS, key="epo")
-
-    with tab5:
-        st.markdown("**Seguimiento a 24 meses (endpoints y fechas)**")
-        st.text_input("Meses de seguimiento total", key="meses_seg")
-        st.markdown("---")
-
-        e1, e2 = st.columns(2)
-        e1.selectbox("Muerte cardiovascular", BOOLS, key="m_cv")
-        e2.text_input("Fecha muerte CV", key="f_m_cv", placeholder="DD/MM/AAAA")
-
-        e3, e4 = st.columns(2)
-        e3.selectbox("Hosp. IC descompensada", BOOLS, key="hosp_ic")
-        e4.text_input("Fecha hosp. IC", key="f_hosp_ic", placeholder="DD/MM/AAAA")
-
-        e5, e6 = st.columns(2)
-        e5.selectbox("IAM no fatal", BOOLS, key="iam")
-        e6.text_input("Fecha IAM", key="f_iam", placeholder="DD/MM/AAAA")
-
-        e7, e8 = st.columns(2)
-        e7.selectbox("ACV no fatal", BOOLS, key="acv")
-        e8.text_input("Fecha ACV", key="f_acv", placeholder="DD/MM/AAAA")
-
-        st.markdown("---")
-
-        e9, e10 = st.columns(2)
-        e9.selectbox("Muerte total", BOOLS, key="m_tot")
-        e10.text_input("Fecha muerte total", key="f_m_tot", placeholder="DD/MM/AAAA")
-
-        e11, e12 = st.columns(2)
-        e11.selectbox("Inicio TRS", BOOLS, key="trs")
-        e12.text_input("Fecha TRS", key="f_trs", placeholder="DD/MM/AAAA")
-
-        e13, e14 = st.columns(2)
-        e13.selectbox("Caída FGe ≥25%", BOOLS, key="caida_fge")
-        e14.text_input("Fecha caída FGe", key="f_caida_fge", placeholder="DD/MM/AAAA")
-
-        e15, e16 = st.columns(2)
-        e15.selectbox("Sd. CR agudo", BOOLS, key="sd_cr")
-        e16.text_input("Fecha Sd. CR agudo", key="f_sd_cr", placeholder="DD/MM/AAAA")
+        with st.expander("Ver extracción IA"):
+            st.json(st.session_state.last_ai_data)
 
 
 # ============================================================
-# VALIDACIÓN + GUARDADO
+# FORMULARIO
+# ============================================================
+
+with col_der:
+    st.subheader("2. Formulario")
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "01. Clínicos","02. Analítica","03. Eco/Fibro","04. Tratamiento","05. Seguimiento"
+    ])
+
+    with tab1:
+        a,b,c,d = st.columns(4)
+        a.text_input("ID Paciente", key="id_pac")
+        b.text_input("Fecha inclusión", key="fecha_inc")
+        c.selectbox("Sexo", ["","H","M"], key="sexo")
+        d.text_input("Edad", key="edad")
+
+        a,b,c,d = st.columns(4)
+        a.text_input("Peso (kg)", key="peso")
+        b.text_input("Talla (cm)", key="talla")
+        c.selectbox("Etiología ERC", ["","DM2","HTA","Glomerulonefritis","Poliquistosis","Otras"], key="eti_erc")
+        d.selectbox("Etiología IC", ["","Isquémica","Hipertensiva","MCD","HFpEF","Valvular"], key="eti_ic")
+
+        st.markdown("**Comorbilidades**")
+        a,b,c,d = st.columns(4)
+        a.selectbox("DM2", BOOLS, key="dm2")
+        b.selectbox("HTA", BOOLS, key="hta")
+        c.selectbox("FA", BOOLS, key="fa")
+        d.selectbox("EPOC", BOOLS, key="epoc")
+        a,b,c,d = st.columns(4)
+        a.selectbox("Sd. Metab", BOOLS, key="sd_metab")
+        b.selectbox("Tabaquismo", BOOLS, key="tabaco")
+        c.selectbox("Enolismo", BOOLS, key="enolismo")
+        d.selectbox("Hepatopatía", BOOLS, key="hepato")
+
+    with tab2:
+        a,b,c,d = st.columns(4)
+        a.text_input("Hemoglobina", key="hb")
+        b.text_input("Creatinina", key="creat")
+        c.text_input("Cistatina C", key="cist_c")
+        d.text_input("FGe", key="fge")
+        a,b,c,d = st.columns(4)
+        a.text_input("Urea", key="urea")
+        b.text_input("Ácido úrico", key="ac_urico")
+        c.text_input("Prot/Creat", key="prot_creat")
+        d.text_input("Plaquetas", key="plaq")
+        a,b,c,d = st.columns(4)
+        a.text_input("AST", key="ast")
+        b.text_input("ALT", key="alt")
+        c.text_input("Bilirrubina total", key="bili_t")
+        d.text_input("Bilirrubina directa", key="bili_d")
+        a,b,c,d = st.columns(4)
+        a.text_input("Albúmina", key="albumina")
+        b.text_input("HbA1c", key="hba1c")
+        c.text_input("Colesterol", key="colest")
+        d.selectbox("Biobanco", BOOLS, key="biobanco")
+        st.markdown("**Biomarcadores**")
+        a,b,c,d = st.columns(4)
+        a.text_input("NT-proBNP", key="nt_probnp")
+        b.text_input("CA125", key="ca125")
+        c.text_input("Galectina-3", key="gal3")
+        d.text_input("sST2", key="sst2")
+        st.text_input("GDF-15", key="gdf15")
+
+    with tab3:
+        a,b,c,d = st.columns(4)
+        a.text_input("FEVI (%)", key="fevi")
+        b.text_input("GLS (%)", key="gls")
+        c.text_input("Masa VI", key="masa_vi")
+        d.text_input("TAPSE", key="tapse")
+        a,b,c,d = st.columns(4)
+        a.text_input("VAI", key="vai")
+        b.text_input("VCI", key="vci")
+        c.text_input("LSM (kPa)", key="lsm")
+        d.text_input("CAP (dB/m)", key="cap")
+        a,b,c,d = st.columns(4)
+        a.text_input("Mediana elastografía", key="med_val")
+        b.text_input("IQR / IQR-mediana", key="iqr_med")
+        c.text_input("Días descompensación", key="dias_desc")
+        d.text_input("NT-proBNP día prueba", key="nt_prueba")
+        a,b = st.columns(2)
+        a.text_input("Categoría fibrosis (sólo si documentada)", key="cat_fibro")
+        b.selectbox("Edemas activos", BOOLS, key="edemas_prueba")
+        st.info("LSM y categoría de fibrosis se mantienen separadas: la IA no infiere fibrosis a partir de LSM.")
+
+    with tab4:
+        a,b,c,d = st.columns(4)
+        a.selectbox("IECA", BOOLS, key="ieca")
+        b.selectbox("ARA2", BOOLS, key="ara2")
+        c.selectbox("Betabloqueante", BOOLS, key="bb")
+        d.selectbox("AMR", BOOLS, key="amr")
+        a,b,c,d = st.columns(4)
+        a.selectbox("SAC/VAL", BOOLS, key="sac_val")
+        b.selectbox("SGLT2i", BOOLS, key="sglt2i")
+        c.selectbox("Diurético asa", BOOLS, key="diur_asa")
+        d.selectbox("HCTZ", BOOLS, key="hctz")
+        a,b,c = st.columns(3)
+        a.selectbox("Acetazolamida", BOOLS, key="acetazolamida")
+        b.selectbox("Estatinas", BOOLS, key="estatinas")
+        c.selectbox("Eritropoyetina", BOOLS, key="epo")
+
+    with tab5:
+        st.text_input("Meses seguimiento", key="meses_seg")
+        a,b = st.columns(2)
+        a.selectbox("Muerte CV", BOOLS, key="m_cv")
+        b.text_input("Fecha muerte CV", key="f_m_cv")
+        a,b = st.columns(2)
+        a.selectbox("Hospitalización IC", BOOLS, key="hosp_ic")
+        b.text_input("Fecha hosp. IC", key="f_hosp_ic")
+        a,b = st.columns(2)
+        a.selectbox("IAM no fatal", BOOLS, key="iam")
+        b.text_input("Fecha IAM", key="f_iam")
+        a,b = st.columns(2)
+        a.selectbox("ACV no fatal", BOOLS, key="acv")
+        b.text_input("Fecha ACV", key="f_acv")
+        st.markdown("---")
+        a,b = st.columns(2)
+        a.selectbox("Muerte total", BOOLS, key="m_tot")
+        b.text_input("Fecha muerte total", key="f_m_tot")
+        a,b = st.columns(2)
+        a.selectbox("Inicio TRS", BOOLS, key="trs")
+        b.text_input("Fecha TRS", key="f_trs")
+        a,b = st.columns(2)
+        a.selectbox("Caída FGe ≥25%", BOOLS, key="caida_fge")
+        b.text_input("Fecha caída FGe", key="f_caida_fge")
+        a,b = st.columns(2)
+        a.selectbox("Sd. CR agudo", BOOLS, key="sd_cr")
+        b.text_input("Fecha Sd. CR agudo", key="f_sd_cr")
+
+
+# ============================================================
+# GUARDAR / EXPORTAR
 # ============================================================
 
 st.markdown("---")
 
-warnings = validar_rangos()
-
+warnings = validation_warnings()
 if warnings:
-    st.warning("Revisa estos valores antes de guardar:")
+    st.warning("Revisa antes de guardar:")
     for w in warnings:
         st.write("• " + w)
 
-col_btn1, col_btn2 = st.columns(2)
+c1,c2,c3 = st.columns(3)
 
-with col_btn1:
-    if st.button("💾 Guardar registro en Excel", use_container_width=True):
-        if warnings:
+with c1:
+    if st.button("💾 GUARDAR EN BASE CENTRAL", type="primary", use_container_width=True):
+        if not st.session_state.id_pac.strip():
+            st.error("El ID de paciente es obligatorio.")
+        elif warnings:
             st.error("Corrige primero los valores fuera de rango.")
         else:
-            ok, msg = guardar_registro()
-            if ok:
-                st.success(msg)
+            data = {k: st.session_state.get(k, DEFAULTS[k]) for k in DEFAULTS}
+            try:
+                ok, mode = db_upsert_patient(data)
+                if ok:
+                    st.success(
+                        f"Paciente {data['id_pac']} {mode} en la BASE CENTRAL."
+                    )
+                    st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo guardar en la base central: {e}")
+
+with c2:
+    try:
+        excel_bytes, n = export_all_excel()
+        st.download_button(
+            "⬇️ EXPORTAR EXCEL ACTUAL",
+            data=excel_bytes,
+            file_name=f"CRD_Tesis_Cardiorrenal_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+    except Exception as e:
+        st.error(f"No se pudo preparar el Excel: {e}")
+
+with c3:
+    if st.button("🔄 Actualizar datos", use_container_width=True):
+        st.rerun()
+
+
+# ============================================================
+# HISTORIAL DEL PACIENTE
+# ============================================================
+
+if st.session_state.get("id_pac"):
+    with st.expander("🕒 Historial de cambios del paciente"):
+        try:
+            history = db_audit(st.session_state.id_pac)
+            if history:
+                st.dataframe(history, use_container_width=True, hide_index=True)
             else:
-                st.error(msg)
+                st.caption("Sin historial.")
+        except Exception as e:
+            st.caption(f"No se pudo cargar el historial: {e}")
 
-with col_btn2:
-    if os.path.exists(EXCEL_FILE):
-        with open(EXCEL_FILE, "rb") as f:
-            st.download_button(
-                label="⬇️ Descargar Excel actualizado",
-                data=f,
-                file_name="CRD_Tesis_Cardiorrenal_Actualizado.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
 
 # ============================================================
-# AUDITORÍA DE LA SESIÓN
+# ÚLTIMOS PACIENTES
 # ============================================================
 
-with st.expander("🔎 Auditoría de esta sesión"):
-    if st.session_state.audit_log:
-        for item in reversed(st.session_state.audit_log):
-            st.write(item)
-    else:
-        st.caption("No hay cambios IA registrados en esta sesión.")
+with st.expander("👥 Últimos pacientes modificados"):
+    try:
+        st.dataframe(db_recent(25), use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.caption(f"No se pudo cargar la lista: {e}")
+
+st.caption(
+    "CRD Tesis Cardiorrenal V3 · La base central es la fuente maestra. "
+    "El Excel es una exportación para análisis/copia."
