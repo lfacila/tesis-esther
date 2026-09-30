@@ -17,7 +17,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# CRD TESIS CARDIORRENAL — V17 PERSISTENCIA DE CAMPOS
+# CRD TESIS CARDIORRENAL — V18 PERSISTENCIA MULTISECCIÓN
 # Interfaz clínica + Supabase central + Gemini + Dashboard
 # ============================================================
 
@@ -317,15 +317,25 @@ def set_date_widget_state(key, value):
     st.session_state[_date_widget_key(key)] = parse_date_value(value)
 
 
-def sync_widgets_to_data():
-    """Copy the currently rendered widget values into the persistent patient draft.
+def sync_rendered_widgets_to_data():
+    """Sync only widgets that are rendered in the current view.
 
-    Streamlit may discard widget state when a widget is not rendered on a rerun.
-    The plain clinical keys are therefore the source of truth. Before any save,
-    copy every existing UI value into those persistent keys so no edited field is
-    lost, even when the user has moved between sections.
+    IMPORTANT: Never copy every ``_ui_*`` key back into the patient draft.
+    Widgets from another clinical section can remain in Session State with an
+    old/blank value after that section is hidden. Copying those stale values was
+    the cause of fields disappearing when saving from Analítica, Ecocardiografía,
+    Tratamiento or Seguimiento. Each rendered widget already writes to its plain
+    clinical key through its callback; this function is only a final safety net
+    for the widgets visible in the current view.
     """
-    for key in DEFAULTS:
+    keys = {"id_pac", "clinical_text"}
+    current_section = st.session_state.get("clinical_section", "")
+    if current_section in SECTION_FIELDS:
+        keys.update(SECTION_FIELDS[current_section])
+
+    for key in keys:
+        if key not in DEFAULTS:
+            continue
         if key in DATE_FIELDS:
             wk = _date_widget_key(key)
             if wk in st.session_state:
@@ -752,7 +762,7 @@ def handle_load_patient():
 def handle_save_patient():
     # Critical: persist every currently rendered widget before collecting the payload.
     # This prevents values from disappearing when the user changed sections and then saved.
-    sync_widgets_to_data()
+    sync_rendered_widgets_to_data()
     recalculate_derived_fields()
     pid = normalize_patient_id(st.session_state.get("id_pac", ""))
     if not pid:
