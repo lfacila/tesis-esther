@@ -11,7 +11,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# CRD TESIS CARDIORRENAL — V10
+# CRD TESIS CARDIORRENAL — V10.1
 # Interfaz clínica + Supabase central + Gemini + Dashboard
 # ============================================================
 
@@ -38,6 +38,13 @@ st.markdown(
     div[data-testid="stMetric"] { background:#f8fafc; border:1px solid #e5e7eb; border-radius:10px; padding:.55rem .7rem; }
     .stTabs [data-baseweb="tab-list"] { gap: 0.35rem; }
     .stTabs [data-baseweb="tab"] { padding: .55rem .9rem; }
+    div[role="radiogroup"] { gap: .35rem; }
+    div[role="radiogroup"] > label {
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: .45rem .8rem;
+        background: #ffffff;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -708,14 +715,33 @@ top1, top2, top3, top4 = st.columns(4)
 top1.metric("Pacientes", count)
 top2.metric("Última actualización", last_update[:16].replace("T", " ") if isinstance(last_update, str) else "—")
 top3.metric("Base", "🟢 Conectada")
-top4.metric("Paciente activo", st.session_state.get("loaded_patient_id") or "—")
+active_patient_display = normalize_patient_id(st.session_state.get("loaded_patient_id", "")) or normalize_patient_id(st.session_state.get("id_pac", ""))
+top4.metric("Paciente activo", active_patient_display or "—")
 
-nav = st.tabs(["📝 Recogida clínica", "📊 Dashboard", "👥 Pacientes", "⚙️ Administración"])
+# Navegación persistente: a diferencia de st.tabs(), el valor queda guardado
+# en session_state y no vuelve a la primera sección cuando hay un rerun.
+MAIN_NAV = ["recogida", "dashboard", "pacientes", "admin"]
+MAIN_NAV_LABELS = {
+    "recogida": "📝 Recogida clínica",
+    "dashboard": "📊 Dashboard",
+    "pacientes": "👥 Pacientes",
+    "admin": "⚙️ Administración",
+}
+if "main_nav" not in st.session_state:
+    st.session_state.main_nav = "recogida"
+main_nav = st.radio(
+    "Sección principal",
+    MAIN_NAV,
+    key="main_nav",
+    horizontal=True,
+    label_visibility="collapsed",
+    format_func=lambda x: MAIN_NAV_LABELS[x],
+)
 
 # ============================================================
 # TAB 1 — RECOGIDA CLÍNICA
 # ============================================================
-with nav[0]:
+if main_nav == "recogida":
     rec1, rec2, rec3 = st.columns([2.2, 1, 1])
     with rec1:
         st.text_input(
@@ -782,13 +808,23 @@ with nav[0]:
                 with st.expander("Ver respuesta estructurada", expanded=False):
                     st.json(st.session_state.last_ai_data)
 
-    section_titles = []
+    section_options = list(SECTION_FIELDS.keys())
+    section_labels = {}
     for title, fields in SECTION_FIELDS.items():
         c, t = section_completion(fields)
-        section_titles.append(f"{title} · {c}/{t}")
-    tabs = st.tabs(section_titles)
+        section_labels[title] = f"{title} · {c}/{t}"
+    if "clinical_section" not in st.session_state or st.session_state.clinical_section not in section_options:
+        st.session_state.clinical_section = section_options[0]
+    clinical_section = st.radio(
+        "Bloque clínico",
+        section_options,
+        key="clinical_section",
+        horizontal=True,
+        label_visibility="collapsed",
+        format_func=lambda x: section_labels[x],
+    )
 
-    with tabs[0]:
+    if clinical_section == section_options[0]:
         st.subheader("Datos basales")
         a,b,c = st.columns(3)
         date_input_field("Fecha inclusión", "fecha_inc", form_locked, a)
@@ -808,7 +844,7 @@ with nav[0]:
         a,b,c,d = st.columns(4)
         tri_state_select("Sd. Metabólico", "sd_metab", form_locked, a); tri_state_select("Tabaquismo", "tabaco", form_locked, b); tri_state_select("Enolismo", "enolismo", form_locked, c); tri_state_select("Hepatopatía", "hepato", form_locked, d)
 
-    with tabs[1]:
+    if clinical_section == section_options[1]:
         st.subheader("Analítica y biomarcadores")
         a,b,c,d = st.columns(4)
         a.text_input(widget_label("Hemoglobina", "hb"), key="hb", disabled=form_locked); b.text_input(widget_label("Creatinina", "creat"), key="creat", disabled=form_locked); c.text_input(widget_label("Cistatina C", "cist_c"), key="cist_c", disabled=form_locked); d.text_input(widget_label("FGe CKD-EPI", "fge"), key="fge", disabled=form_locked)
@@ -824,7 +860,7 @@ with nav[0]:
         a,b = st.columns(2)
         a.text_input(widget_label("GDF-15 (pg/mL)", "gdf15"), key="gdf15", disabled=form_locked); tri_state_select("Muestra biobanco", "biobanco", form_locked, b)
 
-    with tabs[2]:
+    if clinical_section == section_options[2]:
         st.subheader("Ecocardiografía / elastografía")
         a,b,c,d = st.columns(4)
         a.text_input(widget_label("FEVI (%)", "fevi"), key="fevi", disabled=form_locked); b.text_input(widget_label("GLS", "gls"), key="gls", disabled=form_locked); c.text_input(widget_label("Masa VI", "masa_vi"), key="masa_vi", disabled=form_locked); d.text_input(widget_label("TAPSE", "tapse"), key="tapse", disabled=form_locked)
@@ -836,7 +872,7 @@ with nav[0]:
         a.text_input(widget_label("Categoría fibrosis · solo si documentada", "cat_fibro"), key="cat_fibro", disabled=form_locked); tri_state_select("Edemas día prueba", "edemas_prueba", form_locked, b)
         st.info("LSM y categoría de fibrosis se mantienen separadas. La IA no infiere fibrosis a partir de LSM.")
 
-    with tabs[3]:
+    if clinical_section == section_options[3]:
         st.subheader("Tratamiento")
         a,b,c,d = st.columns(4)
         tri_state_select("IECA", "ieca", form_locked, a); tri_state_select("ARA2", "ara2", form_locked, b); tri_state_select("Betabloqueante", "bb", form_locked, c); tri_state_select("AMR", "amr", form_locked, d)
@@ -845,7 +881,7 @@ with nav[0]:
         a,b,c = st.columns(3)
         tri_state_select("Acetazolamida", "acetazolamida", form_locked, a); tri_state_select("Estatinas", "estatinas", form_locked, b); tri_state_select("Eritropoyetina", "epo", form_locked, c)
 
-    with tabs[4]:
+    if clinical_section == section_options[4]:
         st.subheader("Seguimiento 24 meses")
         st.text_input(widget_label("Meses de seguimiento", "meses_seg"), key="meses_seg", disabled=form_locked)
         st.markdown("**Eventos cardiovasculares**")
@@ -905,7 +941,7 @@ with nav[0]:
 # ============================================================
 # TAB 2 — DASHBOARD
 # ============================================================
-with nav[1]:
+if main_nav == "dashboard":
     st.subheader("Dashboard de la cohorte")
     st.caption("Panel descriptivo de la base actual. Los indicadores no sustituyen el análisis estadístico de la tesis.")
     refresh_dash = st.button("↻ Actualizar dashboard", key="refresh_dashboard")
@@ -998,7 +1034,7 @@ with nav[1]:
 # ============================================================
 # TAB 3 — PACIENTES
 # ============================================================
-with nav[2]:
+if main_nav == "pacientes":
     st.subheader("Pacientes")
     st.caption("Búsqueda rápida y control de pacientes de la base central.")
     try:
@@ -1029,7 +1065,7 @@ with nav[2]:
 # ============================================================
 # TAB 4 — ADMINISTRACIÓN
 # ============================================================
-with nav[3]:
+if main_nav == "admin":
     st.subheader("Administración y exportación")
     st.warning("Supabase es la fuente maestra. El Excel es una exportación para análisis, copia y trabajo estadístico.")
     try:
