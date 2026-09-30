@@ -8,6 +8,9 @@ from io import BytesIO
 from pathlib import Path
 import base64
 
+import pandas as pd
+import plotly.graph_objects as go
+
 import openpyxl
 import streamlit as st
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -1208,65 +1211,208 @@ if main_nav == "recogida":
 # ============================================================
 if main_nav == "dashboard":
     st.subheader("Dashboard de la cohorte")
-    st.caption("Panel descriptivo de la base actual. Los indicadores no sustituyen el análisis estadístico de la tesis.")
-    refresh_dash = st.button("↻ Actualizar dashboard", key="refresh_dashboard")
+    st.caption("Visión descriptiva e interactiva de la cohorte actual. Los cálculos inferenciales deben realizarse en el análisis estadístico de la tesis.")
+
     try:
-        rows = patient_rows_flat()
+        rows_all = patient_rows_flat()
     except Exception as e:
+        rows_all = []
         st.error(f"No se pudieron cargar los datos de la cohorte: {e}")
-        rows = []
+
+    # ------------------ filtros ------------------
+    def filter_options(rows, key):
+        vals = sorted({str(r.get(key, "")).strip() for r in rows if str(r.get(key, "")).strip()})
+        return vals
+
+    with st.container(border=True):
+        st.markdown("**🔎 Filtrar cohorte**")
+        f1, f2, f3, f4 = st.columns([1, 1.25, 1.25, 1.25])
+        sex_opts = filter_options(rows_all, "sexo")
+        erc_opts = filter_options(rows_all, "eti_erc")
+        ic_opts = filter_options(rows_all, "eti_ic")
+        age_opts = ["Todos", "<50", "50–64", "65–79", "≥80"]
+        with f1:
+            sex_filter = st.multiselect("Sexo", sex_opts, key="dash_sex")
+        with f2:
+            erc_filter = st.multiselect("Etiología ERC", erc_opts, key="dash_erc")
+        with f3:
+            ic_filter = st.multiselect("Etiología IC", ic_opts, key="dash_ic")
+        with f4:
+            age_filter = st.multiselect("Grupo de edad", age_opts[1:], key="dash_age")
+
+    def age_group(v):
+        x = _to_float(v)
+        if x is None:
+            return "Sin dato"
+        if x < 50:
+            return "<50"
+        if x < 65:
+            return "50–64"
+        if x < 80:
+            return "65–79"
+        return "≥80"
+
+    rows = []
+    for r in rows_all:
+        if sex_filter and r.get("sexo", "") not in sex_filter:
+            continue
+        if erc_filter and r.get("eti_erc", "") not in erc_filter:
+            continue
+        if ic_filter and r.get("eti_ic", "") not in ic_filter:
+            continue
+        if age_filter and age_group(r.get("edad", "")) not in age_filter:
+            continue
+        rows.append(r)
+
     n = len(rows)
     ages = numeric_values(rows, "edad")
     fges = numeric_values(rows, "fge")
     creats = numeric_values(rows, "creat")
     ntprobnp = numeric_values(rows, "nt_probnp")
     imcs = numeric_values(rows, "imc")
+    fevis = numeric_values(rows, "fevi")
     completeness = cohort_completeness(rows)
     avg_comp = (sum(x[3] for x in completeness) / len(completeness)) if completeness else 0
+    mace_n = count_yes(rows, "mace_plus")
+    hosp_n = count_yes(rows, "hosp_ic")
+    death_cv_n = count_yes(rows, "m_cv")
+    dialysis_n = count_yes(rows, "trs")
 
-    a,b,c,d,e = st.columns(5)
-    a.metric("N pacientes", n)
-    b.metric("Edad mediana", f"{median(ages):.0f}" if median(ages) is not None else "—")
-    c.metric("IMC mediano", f"{median(imcs):.1f}" if median(imcs) is not None else "—")
-    d.metric("FGe mediano", f"{median(fges):.1f}" if median(fges) is not None else "—")
-    e.metric("Completitud media", f"{avg_comp:.0%}")
+    # ------------------ KPI cards ------------------
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("👥 Pacientes", n)
+    k2.metric("🎂 Edad mediana", f"{median(ages):.0f} años" if median(ages) is not None else "—")
+    k3.metric("🧪 FGe mediano", f"{median(fges):.1f}" if median(fges) is not None else "—")
+    k4.metric("⚖️ IMC mediano", f"{median(imcs):.1f}" if median(imcs) is not None else "—")
+    k5.metric("❤️ MACE+", f"{mace_n}/{n}" if n else "—")
+    k6.metric("✅ Completitud", f"{avg_comp:.0%}")
 
     st.markdown("### Perfil de la cohorte")
-    p1,p2,p3 = st.columns(3)
+
+    def donut(records, title):
+        fig = go.Figure()
+        if records:
+            labels = [x[0] for x in records]
+            values = [x[1] for x in records]
+            fig.add_trace(go.Pie(
+                labels=labels,
+                values=values,
+                hole=0.55,
+                textinfo="percent",
+                hovertemplate="<b>%{label}</b><br>N=%{value}<br>%{percent}<extra></extra>",
+            ))
+        else:
+            fig.add_annotation(text="Sin datos", x=0.5, y=0.5, showarrow=False, font=dict(size=14))
+        fig.update_layout(
+            title=dict(text=title, x=0.02, xanchor="left", font=dict(size=16)),
+            height=290,
+            margin=dict(l=8, r=8, t=48, b=8),
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.04),
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    p1, p2, p3 = st.columns(3)
     with p1:
-        sex = count_value(rows, "sexo")
-        st.markdown("**Sexo**")
-        st.bar_chart(dataframe_from_records([{"Categoría": k, "N": v} for k,v in sex.items()]).set_index("Categoría") if sex else {"N": []})
+        donut(list(count_value(rows, "sexo").items()), "Sexo")
     with p2:
-        erc = count_value(rows, "eti_erc")
-        erc = {k:v for k,v in erc.items() if k}
-        st.markdown("**Etiología ERC**")
-        st.bar_chart(dataframe_from_records([{"Categoría": k, "N": v} for k,v in erc.items()]).set_index("Categoría") if erc else {"N": []})
+        donut([(k, v) for k, v in count_value(rows, "eti_erc").items() if k], "Etiología ERC")
     with p3:
-        ic = count_value(rows, "eti_ic")
-        ic = {k:v for k,v in ic.items() if k}
-        st.markdown("**Etiología IC**")
-        st.bar_chart(dataframe_from_records([{"Categoría": k, "N": v} for k,v in ic.items()]).set_index("Categoría") if ic else {"N": []})
+        donut([(k, v) for k, v in count_value(rows, "eti_ic").items() if k], "Etiología IC")
 
-    st.markdown("### Comorbilidades y tratamientos")
-    q1,q2 = st.columns(2)
-    comorb_keys = ["dm2","hta","fa","epoc","sd_metab","tabaco","enolismo","hepato"]
-    treatment_keys = ["ieca","ara2","bb","amr","sac_val","sglt2i","diur_asa","estatinas"]
+    # ------------------ Fenotipo + eventos ------------------
+    st.markdown("### Fenotipo clínico y tratamiento")
+    q1, q2 = st.columns(2)
+    comorb_keys = ["dm2", "hta", "fa", "epoc", "sd_metab", "tabaco", "enolismo", "hepato"]
+    treatment_keys = ["ieca", "ara2", "bb", "amr", "sac_val", "sglt2i", "diur_asa", "hctz", "acetazolamida", "estatinas", "epo"]
+
     with q1:
-        data = [{"Variable": FIELD_LABELS[k], "N": count_yes(rows,k)} for k in comorb_keys]
-        st.bar_chart(dataframe_from_records(data).set_index("Variable") if data else [])
+        comorb = pd.DataFrame([
+            {"Variable": FIELD_LABELS[k], "N": count_yes(rows, k)} for k in comorb_keys
+        ]).sort_values("N", ascending=True)
+        fig = go.Figure(go.Bar(
+            x=comorb["N"] if not comorb.empty else [],
+            y=comorb["Variable"] if not comorb.empty else [],
+            orientation="h",
+            text=comorb["N"] if not comorb.empty else [],
+            textposition="outside",
+            hovertemplate="%{y}: N=%{x}<extra></extra>",
+        ))
+        fig.update_layout(title="Comorbilidades", height=360, margin=dict(l=10,r=20,t=48,b=20), xaxis_title="Pacientes", yaxis_title="")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
     with q2:
-        data = [{"Tratamiento": FIELD_LABELS[k], "N": count_yes(rows,k)} for k in treatment_keys]
-        st.bar_chart(dataframe_from_records(data).set_index("Tratamiento") if data else [])
+        tx = pd.DataFrame([
+            {"Tratamiento": FIELD_LABELS[k], "N": count_yes(rows, k)} for k in treatment_keys
+        ]).sort_values("N", ascending=True)
+        fig = go.Figure(go.Bar(
+            x=tx["N"] if not tx.empty else [],
+            y=tx["Tratamiento"] if not tx.empty else [],
+            orientation="h",
+            text=tx["N"] if not tx.empty else [],
+            textposition="outside",
+            hovertemplate="%{y}: N=%{x}<extra></extra>",
+        ))
+        fig.update_layout(title="Tratamiento farmacológico", height=360, margin=dict(l=10,r=20,t=48,b=20), xaxis_title="Pacientes", yaxis_title="")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    st.markdown("### Eventos de seguimiento")
-    event_keys = ["m_cv","hosp_ic","iam","acv","mace_plus","m_tot","trs","caida_fge","sd_cr"]
-    event_table = [{"Evento": FIELD_LABELS[k], "N": count_yes(rows,k)} for k in event_keys]
-    st.dataframe(dataframe_from_records(event_table), use_container_width=True, hide_index=True)
+    st.markdown("### Seguimiento")
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("MACE+", mace_n)
+    e2.metric("Hosp. IC", hosp_n)
+    e3.metric("Muerte CV", death_cv_n)
+    e4.metric("Inicio TRS", dialysis_n)
 
-    st.markdown("### Calidad de datos")
-    c1,c2 = st.columns([1,2])
-    with c1:
+    ev_df = pd.DataFrame([
+        {"Evento": FIELD_LABELS[k], "N": count_yes(rows, k)}
+        for k in ["m_cv", "hosp_ic", "iam", "acv", "mace_plus", "m_tot", "trs", "caida_fge", "sd_cr"]
+    ]).sort_values("N", ascending=False)
+    fig = go.Figure(go.Bar(
+        x=ev_df["Evento"],
+        y=ev_df["N"],
+        text=ev_df["N"],
+        textposition="outside",
+        hovertemplate="%{x}: N=%{y}<extra></extra>",
+    ))
+    fig.update_layout(height=330, margin=dict(l=10,r=10,t=25,b=90), yaxis_title="Pacientes", xaxis_title="")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ------------------ Analítica / dispersión ------------------
+    st.markdown("### Perfil renal y cardiaco")
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        st.metric("Creatinina mediana", f"{median(creats):.2f}" if median(creats) is not None else "—")
+        st.metric("NT-proBNP mediano", f"{median(ntprobnp):.0f}" if median(ntprobnp) is not None else "—")
+    with a2:
+        st.metric("FEVI mediana", f"{median(fevis):.1f}%" if median(fevis) is not None else "—")
+        st.metric("Pacientes con FGe", sum(1 for x in fges))
+    with a3:
+        age_counts = count_value([{"grupo": age_group(r.get("edad", ""))} for r in rows], "grupo")
+        donut([(k, v) for k, v in age_counts.items() if k != "Sin dato"], "Distribución por edad")
+
+    # Scatter edad vs FGe cuando hay datos emparejados
+    paired = []
+    for r in rows:
+        age = _to_float(r.get("edad"))
+        fge = _to_float(r.get("fge"))
+        if age is not None and fge is not None:
+            paired.append({"ID": r.get("id_pac", ""), "Edad": age, "FGe": fge})
+    if len(paired) >= 2:
+        st.markdown("### Edad y función renal")
+        sdf = pd.DataFrame(paired)
+        fig = go.Figure(go.Scatter(
+            x=sdf["Edad"], y=sdf["FGe"], mode="markers",
+            text=sdf["ID"],
+            hovertemplate="ID %{text}<br>Edad=%{x}<br>FGe=%{y}<extra></extra>",
+            marker=dict(size=11, opacity=0.80),
+        ))
+        fig.update_layout(height=330, margin=dict(l=10,r=10,t=20,b=45), xaxis_title="Edad (años)", yaxis_title="FGe (mL/min/1,73 m²)")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ------------------ Calidad de datos ------------------
+    st.markdown("### Calidad de los datos")
+    qc1, qc2 = st.columns([1, 1.6])
+    with qc1:
         bins = {"0–49%":0,"50–74%":0,"75–89%":0,"90–99%":0,"100%":0}
         for _,_,_,p in completeness:
             if p < .5: bins["0–49%"] += 1
@@ -1274,27 +1420,19 @@ if main_nav == "dashboard":
             elif p < .9: bins["75–89%"] += 1
             elif p < 1: bins["90–99%"] += 1
             else: bins["100%"] += 1
-        st.bar_chart(dataframe_from_records([{"Completitud":k,"N":v} for k,v in bins.items()]).set_index("Completitud"))
-    with c2:
+        donut(list(bins.items()), "Completitud de fichas")
+    with qc2:
         missingness = []
         for key in [k for fields in SECTION_FIELDS.values() for k in fields if k not in DERIVED_FIELDS and not k.startswith("f_")]:
             present = sum(1 for r in rows if is_filled(r.get(key,"")))
             missingness.append({"Variable": FIELD_LABELS.get(key,key), "Sin dato": n-present, "% sin dato": round((n-present)/n*100,1) if n else 0})
         missingness.sort(key=lambda x: x["% sin dato"], reverse=True)
-        st.dataframe(dataframe_from_records(missingness[:12]), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(missingness[:12]), use_container_width=True, hide_index=True, column_config={"% sin dato": st.column_config.NumberColumn(format="%.1f%%")})
 
-    with st.expander("📋 Resumen analítico rápido", expanded=False):
-        summary = {
-            "Pacientes": n,
-            "Edad mediana": median(ages),
-            "Creatinina mediana": median(creats),
-            "FGe mediano": median(fges),
-            "NT-proBNP mediano": median(ntprobnp),
-            "MACE+": count_yes(rows, "mace_plus"),
-            "Muerte CV": count_yes(rows, "m_cv"),
-            "Hospitalización IC": count_yes(rows, "hosp_ic"),
-        }
-        st.dataframe(dataframe_from_records([{"Indicador":k,"Valor":v} for k,v in summary.items()]), use_container_width=True, hide_index=True)
+    if n == 0:
+        st.info("No hay pacientes que cumplan los filtros seleccionados.")
+    else:
+        st.caption(f"Mostrando {n} pacientes de {len(rows_all)} en la cohorte. Los filtros afectan a todo el dashboard.")
 
 # ============================================================
 # TAB 3 — PACIENTES
