@@ -616,3 +616,4 @@ with st.expander("👥 Últimos pacientes modificados"):
 st.caption(
     "CRD Tesis Cardiorrenal V3 · La base central es la fuente maestra. "
     "El Excel es una exportación para análisis/copia."
+)
