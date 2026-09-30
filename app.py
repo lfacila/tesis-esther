@@ -3,6 +3,7 @@ import math
 import re
 import time
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from io import BytesIO
 from pathlib import Path
 import base64
@@ -84,6 +85,30 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# ---------- Zona horaria ----------
+MADRID_TZ = ZoneInfo("Europe/Madrid")
+UTC_TZ = ZoneInfo("UTC")
+
+def madrid_now():
+    return datetime.now(MADRID_TZ)
+
+def madrid_now_iso():
+    return madrid_now().isoformat(timespec="seconds")
+
+def format_madrid_datetime(value):
+    if not value or value == "—":
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            # La versión anterior guardaba timestamps sin zona y Streamlit Cloud opera en UTC.
+            # Los convertimos a Madrid al mostrarlos.
+            dt = dt.replace(tzinfo=UTC_TZ)
+        dt = dt.astimezone(MADRID_TZ)
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(value)
 
 # ---------- Secrets ----------
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
@@ -208,6 +233,7 @@ for state_key, initial in {
     "form_mode": "new", "loaded_patient_id": "", "loaded_updated_at": "", "id_exists": False, "id_checked": "",
     "ui_message": "", "ui_message_type": "info", "last_ai_data": {}, "ai_changed_keys": [], "clinical_text": "",
     "ai_model_used": "", "dashboard_cache": [], "patient_search": "", "selected_patient_row": "",
+    "history_patient_id": "", "pending_delete_id": "", "patients_page": 1,
 }.items():
     if state_key not in st.session_state:
         st.session_state[state_key] = initial
@@ -481,7 +507,7 @@ def db_save_patient(data):
         raise ValueError("El ID de paciente es obligatorio.")
     data = dict(data)
     data["id_pac"] = patient_id
-    now = datetime.now().isoformat()
+    now = madrid_now_iso()
     old = db_get_patient(patient_id)
     mode = st.session_state.form_mode
     loaded_id = normalize_patient_id(st.session_state.loaded_patient_id)
@@ -611,6 +637,61 @@ def handle_save_patient():
             set_ui_message(f"⚠️ El paciente {pid} ya existe en la base de datos. No se ha modificado nada. Pulsa 'Cargar paciente' para editarlo.", "warning")
         else:
             set_ui_message(f"No se pudo guardar en la base central: {e}", "error")
+
+
+
+def handle_patient_edit(patient_id):
+    pid = normalize_patient_id(patient_id)
+    if db_load_patient(pid):
+        st.session_state.main_nav = "recogida"
+        set_ui_message(f"Paciente {pid} cargado. Puedes editarlo.", "success")
+    else:
+        set_ui_message(f"No se ha encontrado el paciente {pid}.", "error")
+
+
+def handle_patient_history(patient_id):
+    st.session_state.history_patient_id = normalize_patient_id(patient_id)
+
+
+def handle_patient_delete_request(patient_id):
+    st.session_state.pending_delete_id = normalize_patient_id(patient_id)
+
+
+def db_delete_patient(patient_id):
+    pid = normalize_patient_id(patient_id)
+    if not pid:
+        raise ValueError("ID de paciente no válida.")
+    old = db_get_patient(pid)
+    if not old:
+        return False
+    now = madrid_now_iso()
+    # Conservamos una marca de auditoría mínima del borrado, sin duplicar los datos clínicos.
+    supabase.table("audit_log").insert({
+        "id_pac": pid,
+        "action": "DELETE",
+        "snapshot": {},
+        "changed_at": now,
+        "changed_by": "usuario",
+    }).execute()
+    supabase.table("patients").delete().eq("id_pac", pid).execute()
+    if normalize_patient_id(st.session_state.get("loaded_patient_id", "")) == pid:
+        reset_patient_state()
+    return True
+
+
+def handle_patient_delete_confirmed(patient_id):
+    pid = normalize_patient_id(patient_id)
+    try:
+        deleted = db_delete_patient(pid)
+        if deleted:
+            st.session_state.pending_delete_id = ""
+            st.session_state.history_patient_id = ""
+            set_ui_message(f"Paciente {pid} borrado de la base central.", "success")
+        else:
+            set_ui_message(f"El paciente {pid} ya no existe en la base central.", "warning")
+            st.session_state.pending_delete_id = ""
+    except Exception as e:
+        set_ui_message(f"No se pudo borrar el paciente {pid}: {e}", "error")
 
 # ============================================================
 # GEMINI
@@ -867,7 +948,7 @@ active_patient_display = normalize_patient_id(st.session_state.get("loaded_patie
 
 top1, top2, top3, top4 = st.columns(4)
 top1.metric("Pacientes", count)
-top2.metric("Última actualización", last_update[:16].replace("T", " ") if isinstance(last_update, str) else "—")
+top2.metric("Última actualización", format_madrid_datetime(last_update))
 top3.metric("Base", "🟢 Conectada")
 top4.metric("Paciente activo", active_patient_display or "—")
 
@@ -1112,7 +1193,7 @@ if main_nav == "recogida":
     with s2:
         try:
             excel_bytes, n = export_all_excel()
-            st.download_button("⬇️ Exportar Excel", data=excel_bytes, file_name=f"CRD_Tesis_Cardiorrenal_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+            st.download_button("⬇️ Exportar Excel", data=excel_bytes, file_name=f"CRD_Tesis_Cardiorrenal_{madrid_now().strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         except Exception as e: st.error(f"No se pudo preparar el Excel: {e}")
 
     if current_id:
@@ -1220,31 +1301,90 @@ if main_nav == "dashboard":
 # ============================================================
 if main_nav == "pacientes":
     st.subheader("Pacientes")
-    st.caption("Búsqueda rápida y control de pacientes de la base central.")
+    st.caption("Busca, edita, consulta el historial o elimina una ficha de la base central.")
+
     try:
         all_rows = patient_rows_flat()
     except Exception as e:
         all_rows = []
         st.error(f"No se pudieron cargar los pacientes: {e}")
+
     search = st.text_input("Buscar por ID", key="patient_search", placeholder="Ej.: 3444")
-    filtered = [r for r in all_rows if not search.strip() or search.strip().upper() in str(r.get("id_pac", "")).upper()]
-    table = [{"ID": r.get("id_pac",""), "Última actualización": r.get("updated_at",""), "Usuario": r.get("updated_by","")} for r in filtered]
-    st.dataframe(dataframe_from_records(table), use_container_width=True, hide_index=True)
-    ids = [r.get("id_pac","") for r in filtered if r.get("id_pac")]
-    if ids:
-        pick_col, button_col = st.columns([2,1])
-        with pick_col:
-            selected = st.selectbox("Paciente", ids, key="selected_patient_row")
-        with button_col:
-            st.write("")
-            st.write("")
-            if st.button("🔍 Cargar para editar", type="primary", use_container_width=True):
-                st.session_state.id_pac = selected
-                if db_load_patient(selected):
-                    set_ui_message(f"Paciente {selected} cargado. Ve a 'Recogida clínica' para editarlo.", "success")
-                st.rerun()
-    else:
+    query = search.strip().upper()
+    filtered = [r for r in all_rows if not query or query in str(r.get("id_pac", "")).upper()]
+
+    page_size = 25
+    total_pages = max(1, math.ceil(len(filtered) / page_size))
+    if st.session_state.patients_page > total_pages:
+        st.session_state.patients_page = total_pages
+    page = st.session_state.patients_page
+    start_i = (page - 1) * page_size
+    visible = filtered[start_i:start_i + page_size]
+
+    h = st.columns([1.15, 2.2, 0.9, 0.9, 0.9, 0.9])
+    h[0].markdown("**ID**")
+    h[1].markdown("**Última actualización (Madrid)**")
+    h[2].markdown("**Editar**")
+    h[3].markdown("**Historial**")
+    h[4].markdown("**Resumen**")
+    h[5].markdown("**Borrar**")
+
+    for row in visible:
+        pid = normalize_patient_id(row.get("id_pac", ""))
+        if not pid:
+            continue
+        cols = st.columns([1.15, 2.2, 0.9, 0.9, 0.9, 0.9])
+        cols[0].write(f"**{pid}**")
+        cols[1].write(format_madrid_datetime(row.get("updated_at", "")))
+        with cols[2]:
+            st.button("✏️", key=f"edit_{pid}", help=f"Editar paciente {pid}", use_container_width=True, on_click=handle_patient_edit, args=(pid,))
+        with cols[3]:
+            st.button("🕘", key=f"hist_{pid}", help=f"Ver historial de {pid}", use_container_width=True, on_click=handle_patient_history, args=(pid,))
+        with cols[4]:
+            with st.popover("👁️", use_container_width=True):
+                st.markdown(f"**Paciente {pid}**")
+                st.metric("Edad", row.get("edad") or "—")
+                st.metric("Sexo", row.get("sexo") or "—")
+                st.metric("FGe", row.get("fge") or "—")
+                st.metric("IMC", row.get("imc") or "—")
+                st.caption(f"Etiología ERC: {row.get('eti_erc') or '—'}")
+                st.caption(f"Etiología IC: {row.get('eti_ic') or '—'}")
+        with cols[5]:
+            st.button("🗑️", key=f"delete_{pid}", help=f"Borrar paciente {pid}", use_container_width=True, on_click=handle_patient_delete_request, args=(pid,))
+
+        if st.session_state.get("pending_delete_id") == pid:
+            st.warning(f"⚠️ **¿Borrar definitivamente el paciente {pid}?** Se eliminará de la base activa. Esta acción no se puede deshacer desde la aplicación.")
+            dc1, dc2, dc3 = st.columns([1,1,3])
+            with dc1:
+                st.button("Borrar", key=f"confirm_delete_{pid}", type="primary", use_container_width=True, on_click=handle_patient_delete_confirmed, args=(pid,))
+            with dc2:
+                st.button("Cancelar", key=f"cancel_delete_{pid}", use_container_width=True, on_click=lambda: st.session_state.update(pending_delete_id=""))
+
+    if not visible:
         st.info("No hay pacientes que coincidan con la búsqueda.")
+
+    # Paginación estable
+    pc1, pc2, pc3 = st.columns([1,2,1])
+    with pc1:
+        st.button("← Anterior", disabled=page <= 1, key="patients_prev", on_click=lambda: st.session_state.update(patients_page=max(1, page-1)))
+    with pc2:
+        st.markdown(f"<div style='text-align:center;padding-top:8px;'>Página <strong>{page}</strong> de <strong>{total_pages}</strong> · {len(filtered)} pacientes</div>", unsafe_allow_html=True)
+    with pc3:
+        st.button("Siguiente →", disabled=page >= total_pages, key="patients_next", on_click=lambda: st.session_state.update(patients_page=min(total_pages, page+1)))
+
+    history_id = normalize_patient_id(st.session_state.get("history_patient_id", ""))
+    if history_id:
+        st.markdown(f"### Historial de {history_id}")
+        try:
+            history = db_audit(history_id)
+            if history:
+                history_rows = [{"Acción": h.get("action", ""), "Fecha (Madrid)": format_madrid_datetime(h.get("changed_at", ""))} for h in history]
+                st.dataframe(dataframe_from_records(history_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No hay registros de auditoría para este paciente.")
+        except Exception as e:
+            st.error(f"No se pudo cargar el historial: {e}")
+        st.button("Cerrar historial", key="close_history", on_click=lambda: st.session_state.update(history_patient_id=""))
 
 # ============================================================
 # TAB 4 — ADMINISTRACIÓN
@@ -1254,7 +1394,7 @@ if main_nav == "admin":
     st.warning("Supabase es la fuente maestra. El Excel es una exportación para análisis, copia y trabajo estadístico.")
     try:
         excel_bytes, n_export = export_all_excel()
-        st.download_button("⬇️ Descargar base completa en Excel", data=excel_bytes, file_name=f"CRD_Tesis_Cardiorrenal_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        st.download_button("⬇️ Descargar base completa en Excel", data=excel_bytes, file_name=f"CRD_Tesis_Cardiorrenal_{madrid_now().strftime('%Y%m%d_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         st.caption(f"Exportación preparada: {n_export} pacientes.")
     except Exception as e:
         st.error(f"No se pudo preparar la exportación: {e}")
