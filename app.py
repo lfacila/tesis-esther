@@ -4,6 +4,8 @@ import re
 import time
 from datetime import datetime, date
 from io import BytesIO
+from pathlib import Path
+import base64
 
 import openpyxl
 import streamlit as st
@@ -11,7 +13,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# CRD TESIS CARDIORRENAL — V10.1
+# CRD TESIS CARDIORRENAL — V10.2 DISEÑO ESTHER
 # Interfaz clínica + Supabase central + Gemini + Dashboard
 # ============================================================
 
@@ -25,25 +27,57 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .block-container { padding-top: 1.0rem; padding-bottom: 2.5rem; max-width: 1500px; }
-    .hero { padding: 0.2rem 0 0.8rem 0; }
-    .hero h1 { margin-bottom: .15rem; font-size: 2rem; }
-    .hero p { color:#6b7280; margin-top:0; }
-    .section-card { border:1px solid #e5e7eb; border-radius:12px; padding:14px 16px; margin-bottom:12px; background:#ffffff; }
-    .mini-label { color:#6b7280; font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+    .block-container { padding-top: 0.8rem; padding-bottom: 2.5rem; max-width: 1480px; }
+    .app-hero {
+        border: 1px solid #dbe6ee;
+        border-radius: 20px;
+        padding: 18px 22px;
+        margin: 2px 0 14px 0;
+        background: linear-gradient(135deg, #f7fbff 0%, #eef7f4 58%, #ffffff 100%);
+        box-shadow: 0 8px 26px rgba(15, 49, 72, 0.06);
+    }
+    .app-title { font-size: 2.05rem; font-weight: 800; color:#102a43; margin:0; line-height:1.08; }
+    .app-subtitle { color:#5b7083; font-size:.95rem; margin-top:5px; }
+    .app-kicker { color:#2b6f7e; font-size:.75rem; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+    .person-card {
+        border-left: 1px solid #d8e5ec;
+        padding-left: 18px;
+        min-height: 84px;
+    }
+    .person-name { color:#16384f; font-weight:750; font-size:1.08rem; margin-top:2px; }
+    .person-role { color:#6a7e8d; font-size:.82rem; margin-top:2px; }
+    .avatar-wrap img {
+        width:76px !important; height:76px !important; object-fit:cover;
+        border-radius:50%; border:3px solid rgba(255,255,255,.96);
+        box-shadow:0 4px 14px rgba(24, 60, 83, .16);
+    }
+    .section-card { border:1px solid #e5e7eb; border-radius:14px; padding:14px 16px; margin-bottom:12px; background:#ffffff; }
+    .mini-label { color:#6b7280; font-size:.76rem; text-transform:uppercase; letter-spacing:.04em; }
     .status-ok { color:#166534; font-weight:600; }
     .status-warn { color:#92400e; font-weight:600; }
     .status-blue { color:#1d4ed8; font-weight:600; }
     .ai-note { font-size:.88rem; }
-    div[data-testid="stMetric"] { background:#f8fafc; border:1px solid #e5e7eb; border-radius:10px; padding:.55rem .7rem; }
-    .stTabs [data-baseweb="tab-list"] { gap: 0.35rem; }
-    .stTabs [data-baseweb="tab"] { padding: .55rem .9rem; }
-    div[role="radiogroup"] { gap: .35rem; }
+    div[data-testid="stMetric"] { background:#fbfdfe; border:1px solid #dfe8ee; border-radius:12px; padding:.65rem .8rem; }
+    div[data-testid="stMetricValue"] { color:#16384f; }
+    div[role="radiogroup"] { gap: .38rem; }
     div[role="radiogroup"] > label {
-        border: 1px solid #e5e7eb;
+        border: 1px solid #dbe5eb;
         border-radius: 10px;
-        padding: .45rem .8rem;
+        padding: .47rem .82rem;
         background: #ffffff;
+    }
+    div[data-testid="stButton"] > button {
+        border-radius: 10px;
+        min-height: 42px;
+        font-weight: 650;
+    }
+    .nav-shell {
+        border: 1px solid #dbe6ee;
+        border-radius: 14px;
+        padding: 4px 8px 2px 8px;
+        background:#ffffff;
+        box-shadow: 0 4px 14px rgba(15, 49, 72, 0.04);
+        margin-bottom: 14px;
     }
     </style>
     """,
@@ -56,6 +90,53 @@ SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
+
+# ---------- Marca / cabecera ----------
+APP_DIR = Path(__file__).resolve().parent
+PHOTO_PATH = APP_DIR / "assets" / "esther_tamarit_small.jpg"
+
+def _photo_data_uri(path):
+    if not path.exists():
+        return ""
+    try:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        return ""
+
+PHOTO_DATA_URI = _photo_data_uri(PHOTO_PATH)
+
+def render_brand_header():
+    """Cabecera compacta y profesional de la tesis."""
+    photo_html = (
+        f'<img src="{PHOTO_DATA_URI}" alt="Esther Tamarit" '
+        'style="width:82px;height:82px;object-fit:cover;border-radius:50%;'
+        'border:3px solid #ffffff;box-shadow:0 5px 16px rgba(24,60,83,.16);">'
+        if PHOTO_DATA_URI else ""
+    )
+    st.markdown(
+        f"""
+        <div class="app-hero">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:24px;">
+            <div style="min-width:0;">
+              <div class="app-kicker">Proyecto de tesis · enfermedad cardiorrenal</div>
+              <div class="app-title">CRD Tesis Cardiorrenal</div>
+              <div class="app-subtitle">Recogida clínica · seguimiento · control de calidad · análisis de la cohorte</div>
+              <div style="margin-top:12px;">
+                <span style="display:inline-block;padding:5px 10px;border-radius:999px;background:#eaf5f4;color:#22626b;font-size:.76rem;font-weight:700;">TESIS ESTHER TAMARIT</span>
+              </div>
+            </div>
+            <div style="text-align:center;min-width:112px;">
+              {photo_html}
+              <div class="person-name" style="margin-top:5px;">Esther Tamarit</div>
+              <div class="person-role">Investigadora</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Faltan SUPABASE_URL y/o SUPABASE_KEY en los Secrets de Streamlit.")
     st.stop()
@@ -64,7 +145,26 @@ if APP_PASSWORD:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
     if not st.session_state.authenticated:
-        st.markdown('<div class="hero"><h1>CRD Tesis Cardiorrenal</h1><p>Acceso a la base de recogida clínica</p></div>', unsafe_allow_html=True)
+        if PHOTO_DATA_URI:
+            st.markdown(
+                f"""
+                <div class="app-hero">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;">
+                    <div>
+                      <div class="app-kicker">Proyecto de tesis</div>
+                      <div class="app-title">CRD Tesis Cardiorrenal</div>
+                      <div class="app-subtitle">Acceso a la plataforma de recogida clínica</div>
+                    </div>
+                    <div>
+                      <img src="{PHOTO_DATA_URI}" alt="Esther Tamarit" style="width:78px;height:78px;object-fit:cover;border-radius:50%;border:3px solid #fff;box-shadow:0 5px 16px rgba(24,60,83,.16);">
+                    </div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown('<div class="app-title">CRD Tesis Cardiorrenal</div><div class="app-subtitle">Acceso a la plataforma de recogida clínica</div>', unsafe_allow_html=True)
         password = st.text_input("Contraseña", type="password")
         if st.button("Entrar", type="primary", use_container_width=True):
             if password == APP_PASSWORD:
@@ -73,6 +173,7 @@ if APP_PASSWORD:
             else:
                 st.error("Contraseña incorrecta.")
         st.stop()
+
 
 # ---------- Cliente Supabase ----------
 try:
@@ -705,21 +806,20 @@ def export_all_excel():
 # TOP HEADER + MAIN NAVIGATION
 # ============================================================
 
-st.markdown('<div class="hero"><h1>❤️ CRD Tesis Cardiorrenal</h1><p>Recogida clínica · base central · control de calidad · dashboard</p></div>', unsafe_allow_html=True)
+render_brand_header()
 
 count = db_count()
 recent = db_recent(1)
 last_update = recent[0]["updated_at"] if recent else "—"
+active_patient_display = normalize_patient_id(st.session_state.get("loaded_patient_id", "")) or normalize_patient_id(st.session_state.get("id_pac", ""))
 
 top1, top2, top3, top4 = st.columns(4)
 top1.metric("Pacientes", count)
 top2.metric("Última actualización", last_update[:16].replace("T", " ") if isinstance(last_update, str) else "—")
 top3.metric("Base", "🟢 Conectada")
-active_patient_display = normalize_patient_id(st.session_state.get("loaded_patient_id", "")) or normalize_patient_id(st.session_state.get("id_pac", ""))
 top4.metric("Paciente activo", active_patient_display or "—")
 
-# Navegación persistente: a diferencia de st.tabs(), el valor queda guardado
-# en session_state y no vuelve a la primera sección cuando hay un rerun.
+# Navegación persistente
 MAIN_NAV = ["recogida", "dashboard", "pacientes", "admin"]
 MAIN_NAV_LABELS = {
     "recogida": "📝 Recogida clínica",
@@ -729,6 +829,7 @@ MAIN_NAV_LABELS = {
 }
 if "main_nav" not in st.session_state:
     st.session_state.main_nav = "recogida"
+st.markdown('<div class="nav-shell">', unsafe_allow_html=True)
 main_nav = st.radio(
     "Sección principal",
     MAIN_NAV,
@@ -737,6 +838,7 @@ main_nav = st.radio(
     label_visibility="collapsed",
     format_func=lambda x: MAIN_NAV_LABELS[x],
 )
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # TAB 1 — RECOGIDA CLÍNICA
@@ -757,6 +859,14 @@ if main_nav == "recogida":
         st.button("＋ Nuevo", use_container_width=True, on_click=handle_new_patient)
 
     current_id = normalize_patient_id(st.session_state.get("id_pac", ""))
+    if current_id:
+        context_state = "🟢 Paciente en edición" if st.session_state.form_mode == "edit" else ("🟡 Paciente nuevo" if not st.session_state.id_exists else "🔴 ID ya existente")
+        st.markdown(
+            f'<div class="section-card" style="padding:9px 14px; margin:8px 0 12px 0;">'
+            f'<span class="mini-label">Paciente activo</span> &nbsp; <strong>{current_id}</strong>'
+            f' &nbsp;&nbsp; <span style="color:#64748b;">{context_state}</span></div>',
+            unsafe_allow_html=True,
+        )
     if st.session_state.form_mode == "edit":
         st.success(f"🟢 **Editando paciente {st.session_state.loaded_patient_id}**")
     elif current_id and st.session_state.id_checked == current_id and st.session_state.id_exists:
