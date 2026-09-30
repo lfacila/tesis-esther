@@ -13,7 +13,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# CRD TESIS CARDIORRENAL — V11 ESTABLE
+# CRD TESIS CARDIORRENAL — V12 ESTABLE
 # Interfaz clínica + Supabase central + Gemini + Dashboard
 # ============================================================
 
@@ -216,8 +216,8 @@ for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 for date_key in DATE_FIELDS:
-    if f"_date_{date_key}" not in st.session_state:
-        st.session_state[f"_date_{date_key}"] = None
+    if f"_ui_date_{date_key}" not in st.session_state:
+        st.session_state[f"_ui_date_{date_key}"] = None
 
 # ============================================================
 # HELPERS / DATABASE
@@ -269,21 +269,93 @@ def parse_date_value(value):
     return None
 
 
+def _widget_key(key):
+    """Separate UI widget state from persistent clinical data state.
+
+    Streamlit cleans up widgets that are not rendered on a later rerun. The
+    persistent keys (the plain clinical variable names) therefore remain the
+    source of truth, while _ui_* keys are disposable widget state.
+    """
+    return f"_ui_{key}"
+
+
+def _date_widget_key(key):
+    return f"_ui_date_{key}"
+
+
 def set_date_widget_state(key, value):
-    st.session_state[f"_date_{key}"] = parse_date_value(value)
+    st.session_state[_date_widget_key(key)] = parse_date_value(value)
 
 
-def sync_date_field(key, value):
-    st.session_state[key] = value.isoformat() if value else ""
+def persistent_text_input(label, key, disabled=False, container=None, on_change=None, args=None, **kwargs):
+    target = container if container is not None else st
+    wk = _widget_key(key)
+    if wk not in st.session_state:
+        st.session_state[wk] = st.session_state.get(key, DEFAULTS.get(key, ""))
+    value = target.text_input(
+        widget_label(label, key),
+        key=wk,
+        disabled=disabled,
+        on_change=on_change,
+        args=args or (),
+        **kwargs,
+    )
+    st.session_state[key] = value
+    return value
+
+
+def persistent_text_area(label, key, disabled=False, container=None, on_change=None, args=None, **kwargs):
+    target = container if container is not None else st
+    wk = _widget_key(key)
+    if wk not in st.session_state:
+        st.session_state[wk] = st.session_state.get(key, "")
+    value = target.text_area(
+        widget_label(label, key),
+        key=wk,
+        disabled=disabled,
+        on_change=on_change,
+        args=args or (),
+        **kwargs,
+    )
+    st.session_state[key] = value
+    return value
+
+
+def persistent_selectbox(label, key, options, disabled=False, container=None, format_func=None, on_change=None, args=None, **kwargs):
+    target = container if container is not None else st
+    wk = _widget_key(key)
+    current = st.session_state.get(key, DEFAULTS.get(key, ""))
+    if current not in options:
+        current = options[0] if options else ""
+        st.session_state[key] = current
+    if wk not in st.session_state:
+        st.session_state[wk] = current
+    value = target.selectbox(
+        widget_label(label, key),
+        options,
+        key=wk,
+        disabled=disabled,
+        format_func=format_func,
+        on_change=on_change,
+        args=args or (),
+        **kwargs,
+    )
+    st.session_state[key] = value
+    return value
 
 
 def date_input_field(label, key, disabled=False, container=None):
     target = container if container is not None else st
-    widget_key = f"_date_{key}"
-    if widget_key not in st.session_state:
-        st.session_state[widget_key] = parse_date_value(st.session_state.get(key, ""))
-    selected = target.date_input(widget_label(label, key), key=widget_key, format="DD/MM/YYYY", disabled=disabled)
-    sync_date_field(key, selected)
+    wk = _date_widget_key(key)
+    if wk not in st.session_state:
+        st.session_state[wk] = parse_date_value(st.session_state.get(key, ""))
+    selected = target.date_input(
+        widget_label(label, key),
+        key=wk,
+        format="DD/MM/YYYY",
+        disabled=disabled,
+    )
+    st.session_state[key] = selected.isoformat() if selected else ""
     return selected
 
 
@@ -362,9 +434,12 @@ def widget_label(text, key):
 
 
 def tri_state_select(label, key, disabled=False, container=None, on_change=None, args=None):
-    target = container if container is not None else st
-    return target.selectbox(
-        widget_label(label, key), ["", "Sí", "No"], key=key, disabled=disabled,
+    return persistent_selectbox(
+        label,
+        key,
+        ["", "Sí", "No"],
+        disabled=disabled,
+        container=container,
         format_func=lambda x: "— No recogido —" if x == "" else x,
         on_change=on_change,
         args=args or (),
@@ -372,11 +447,14 @@ def tri_state_select(label, key, disabled=False, container=None, on_change=None,
 
 
 def handle_event_change(event_key, date_key):
-    # Mantener siempre el widget de fecha evita que Streamlit reconstruya
-    # el árbol de widgets al cambiar Sí/No y pierda el valor seleccionado.
-    if st.session_state.get(event_key, "") != "Sí":
+    """Synchronize an event and clear its date before the next render if No."""
+    event_wk = _widget_key(event_key)
+    date_wk = _date_widget_key(date_key)
+    value = st.session_state.get(event_wk, "")
+    st.session_state[event_key] = value
+    if value != "Sí":
         st.session_state[date_key] = ""
-        st.session_state[f"_date_{{date_key}}"] = None
+        st.session_state[date_wk] = None
 
 
 def validation_warnings():
@@ -444,6 +522,10 @@ def db_load_patient(patient_id):
         st.session_state[k] = data.get(k, DEFAULTS[k])
     for key in DATE_FIELDS:
         set_date_widget_state(key, st.session_state.get(key, ""))
+    for key in DEFAULTS:
+        if key not in DATE_FIELDS:
+            st.session_state[_widget_key(key)] = st.session_state.get(key, DEFAULTS[key])
+    st.session_state[_widget_key("id_pac")] = normalize_patient_id(patient_id)
     st.session_state.id_pac = normalize_patient_id(patient_id)
     st.session_state.form_mode = "edit"
     st.session_state.loaded_patient_id = normalize_patient_id(patient_id)
@@ -465,6 +547,8 @@ def reset_patient_state():
         st.session_state[k] = v
     for key in DATE_FIELDS:
         set_date_widget_state(key, "")
+    for key, value in DEFAULTS.items():
+        st.session_state[_widget_key(key)] = value
     st.session_state.form_mode = "new"
     st.session_state.loaded_patient_id = ""
     st.session_state.loaded_updated_at = ""
@@ -473,6 +557,7 @@ def reset_patient_state():
     st.session_state.last_ai_data = {}
     st.session_state.ai_changed_keys = []
     st.session_state.clinical_text = ""
+    st.session_state[_widget_key("clinical_text")] = ""
     st.session_state.ai_model_used = ""
 
 
@@ -482,7 +567,9 @@ def handle_new_patient():
 
 
 def handle_id_change():
-    pid = normalize_patient_id(st.session_state.get("id_pac", ""))
+    pid = normalize_patient_id(st.session_state.get(_widget_key("id_pac"), ""))
+    st.session_state[_widget_key("id_pac")] = pid
+    st.session_state.id_pac = pid
     st.session_state.id_checked = pid
     st.session_state.id_exists = bool(pid and db_patient_exists(pid))
 
@@ -643,10 +730,15 @@ def apply_ai(data):
             changes.append((key, old, value))
             changed_keys.append(key)
             st.session_state[key] = value
+            st.session_state[_widget_key(key)] = value
     st.session_state.last_ai_data = data
     st.session_state.ai_changed_keys = changed_keys
     recalculate_derived_fields()
     return changes
+
+def choose_clinical_section(section):
+    st.session_state.clinical_section = section
+
 
 # ============================================================
 # DASHBOARD HELPERS
@@ -806,9 +898,9 @@ st.markdown('</div>', unsafe_allow_html=True)
 if main_nav == "recogida":
     rec1, rec2, rec3 = st.columns([2.2, 1, 1])
     with rec1:
-        st.text_input(
+        persistent_text_input(
             "ID paciente",
-            key="id_pac",
+            "id_pac",
             disabled=(st.session_state.form_mode == "edit"),
             on_change=handle_id_change,
             help="La comprobación se hace automáticamente al salir del campo.",
@@ -851,7 +943,7 @@ if main_nav == "recogida":
     with st.expander("🧠 **Texto clínico e IA**", expanded=False):
         left, right = st.columns([1.15, 1])
         with left:
-            st.text_area("Pega aquí la evolución / historia clínica", height=220, key="clinical_text", disabled=form_locked, placeholder="Pega el texto clínico anonimizado…")
+            persistent_text_area("Pega aquí la evolución / historia clínica", "clinical_text", height=220, disabled=form_locked, placeholder="Pega el texto clínico anonimizado…")
             st.caption("El texto clínico no se guarda en Supabase.")
             if st.button("🧠 Extraer datos con IA", type="primary", use_container_width=True, disabled=form_locked):
                 if not st.session_state.clinical_text.strip():
@@ -879,39 +971,42 @@ if main_nav == "recogida":
                     st.json(st.session_state.last_ai_data)
 
     section_options = list(SECTION_FIELDS.keys())
-    section_labels = {}
-    for title, fields in SECTION_FIELDS.items():
-        c, t = section_completion(fields)
-        section_labels[title] = f"{title} · {c}/{t}"
-
-    # Navegación clínica persistente con un único widget y valores internos
-    # estables. El texto visible puede cambiar (p. ej. 2/11 → 3/11), pero el
-    # valor guardado de la sección no cambia y sobrevive a cada rerun.
     if "clinical_section" not in st.session_state or st.session_state.clinical_section not in section_options:
         st.session_state.clinical_section = section_options[0]
+    clinical_section = st.session_state.clinical_section
 
-    clinical_section = st.radio(
-        "Sección clínica",
-        section_options,
-        key="clinical_section",
-        horizontal=True,
-        label_visibility="collapsed",
-        format_func=lambda x: section_labels[x],
-    )
+    # Navegación clínica estable: los botones tienen etiquetas fijas y la
+    # sección activa vive en Session State, fuera del estado de los widgets.
+    st.markdown("<div class='nav-shell'>", unsafe_allow_html=True)
+    nav_cols = st.columns(len(section_options))
+    for idx, title in enumerate(section_options):
+        c, t = section_completion(SECTION_FIELDS[title])
+        short_title = title.split(". ", 1)[1]
+        with nav_cols[idx]:
+            st.button(
+                f"{idx+1:02d}. {short_title}",
+                key=f"clinical_nav_{idx}",
+                use_container_width=True,
+                type="primary" if title == clinical_section else "secondary",
+                on_click=choose_clinical_section,
+                args=(title,),
+            )
+            st.caption(f"{c}/{t} variables")
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if clinical_section == section_options[0]:
         st.subheader("Datos basales")
         a,b,c = st.columns(3)
         date_input_field("Fecha inclusión", "fecha_inc", form_locked, a)
-        b.selectbox(widget_label("Sexo", "sexo"), ["", "H", "M"], key="sexo", disabled=form_locked, format_func=lambda x: "— No recogido —" if x == "" else x)
-        c.text_input(widget_label("Edad", "edad"), key="edad", disabled=form_locked)
+        persistent_selectbox("Sexo", "sexo", ["", "H", "M"], disabled=form_locked, container=b, format_func=lambda x: "— No recogido —" if x == "" else x)
+        persistent_text_input("Edad", "edad", disabled=form_locked, container=c)
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("Peso (kg)", "peso"), key="peso", disabled=form_locked)
-        b.text_input(widget_label("Talla (cm)", "talla"), key="talla", disabled=form_locked)
-        c.text_input("IMC · calculado", value=calculate_imc(), disabled=True)
-        d.selectbox(widget_label("Etiología ERC", "eti_erc"), ["", "DM2", "HTA", "Glomerulonefritis", "Poliquistosis", "Otras"], key="eti_erc", disabled=form_locked, format_func=lambda x: "— No recogida —" if x == "" else x)
+        persistent_text_input("Peso (kg)", "peso", disabled=form_locked, container=a)
+        persistent_text_input("Talla (cm)", "talla", disabled=form_locked, container=b)
+        c.metric("IMC · calculado", calculate_imc() or "—")
+        persistent_selectbox("Etiología ERC", "eti_erc", ["", "DM2", "HTA", "Glomerulonefritis", "Poliquistosis", "Otras"], disabled=form_locked, container=d, format_func=lambda x: "— No recogida —" if x == "" else x)
         a,b = st.columns(2)
-        a.selectbox(widget_label("Etiología IC", "eti_ic"), ["", "Isquémica", "Hipertensiva", "MCD", "HFpEF", "Valvular", "Otras"], key="eti_ic", disabled=form_locked, format_func=lambda x: "— No recogida —" if x == "" else x)
+        persistent_selectbox("Etiología IC", "eti_ic", ["", "Isquémica", "Hipertensiva", "MCD", "HFpEF", "Valvular", "Otras"], disabled=form_locked, container=a, format_func=lambda x: "— No recogida —" if x == "" else x)
         b.caption("Las etiologías no se infieren a partir de otros datos.")
         st.markdown("**Comorbilidades**")
         a,b,c,d = st.columns(4)
@@ -922,29 +1017,29 @@ if main_nav == "recogida":
     if clinical_section == section_options[1]:
         st.subheader("Analítica y biomarcadores")
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("Hemoglobina", "hb"), key="hb", disabled=form_locked); b.text_input(widget_label("Creatinina", "creat"), key="creat", disabled=form_locked); c.text_input(widget_label("Cistatina C", "cist_c"), key="cist_c", disabled=form_locked); d.text_input(widget_label("FGe CKD-EPI", "fge"), key="fge", disabled=form_locked)
+        persistent_text_input("Hemoglobina", "hb", disabled=form_locked, container=a); persistent_text_input("Creatinina", "creat", disabled=form_locked, container=b); persistent_text_input("Cistatina C", "cist_c", disabled=form_locked, container=c); persistent_text_input("FGe CKD-EPI", "fge", disabled=form_locked, container=d)
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("Urea", "urea"), key="urea", disabled=form_locked); b.text_input(widget_label("Ácido úrico", "ac_urico"), key="ac_urico", disabled=form_locked); c.text_input(widget_label("Prot/Creat", "prot_creat"), key="prot_creat", disabled=form_locked); d.text_input(widget_label("Plaquetas", "plaq"), key="plaq", disabled=form_locked)
+        persistent_text_input("Urea", "urea", disabled=form_locked, container=a); persistent_text_input("Ácido úrico", "ac_urico", disabled=form_locked, container=b); persistent_text_input("Prot/Creat", "prot_creat", disabled=form_locked, container=c); persistent_text_input("Plaquetas", "plaq", disabled=form_locked, container=d)
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("AST", "ast"), key="ast", disabled=form_locked); b.text_input(widget_label("ALT", "alt"), key="alt", disabled=form_locked); c.text_input("FIB-4 · calculado", value=calculate_fib4(), disabled=True); d.text_input(widget_label("Bilirrubina total", "bili_t"), key="bili_t", disabled=form_locked)
+        persistent_text_input("AST", "ast", disabled=form_locked, container=a); persistent_text_input("ALT", "alt", disabled=form_locked, container=b); c.metric("FIB-4 · calculado", calculate_fib4() or "—"); persistent_text_input("Bilirrubina total", "bili_t", disabled=form_locked, container=d)
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("Bilirrubina directa", "bili_d"), key="bili_d", disabled=form_locked); b.text_input(widget_label("Albúmina", "albumina"), key="albumina", disabled=form_locked); c.text_input(widget_label("HbA1c", "hba1c"), key="hba1c", disabled=form_locked); d.text_input(widget_label("Colesterol total", "colest"), key="colest", disabled=form_locked)
+        persistent_text_input("Bilirrubina directa", "bili_d", disabled=form_locked, container=a); persistent_text_input("Albúmina", "albumina", disabled=form_locked, container=b); persistent_text_input("HbA1c", "hba1c", disabled=form_locked, container=c); persistent_text_input("Colesterol total", "colest", disabled=form_locked, container=d)
         st.markdown("**Biomarcadores**")
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("NT-proBNP (pg/mL)", "nt_probnp"), key="nt_probnp", disabled=form_locked); b.text_input(widget_label("CA125 (U/mL)", "ca125"), key="ca125", disabled=form_locked); c.text_input(widget_label("Galectina-3 (ng/mL)", "gal3"), key="gal3", disabled=form_locked); d.text_input(widget_label("sST2 (ng/mL)", "sst2"), key="sst2", disabled=form_locked)
+        persistent_text_input("NT-proBNP (pg/mL)", "nt_probnp", disabled=form_locked, container=a); persistent_text_input("CA125 (U/mL)", "ca125", disabled=form_locked, container=b); persistent_text_input("Galectina-3 (ng/mL)", "gal3", disabled=form_locked, container=c); persistent_text_input("sST2 (ng/mL)", "sst2", disabled=form_locked, container=d)
         a,b = st.columns(2)
-        a.text_input(widget_label("GDF-15 (pg/mL)", "gdf15"), key="gdf15", disabled=form_locked); tri_state_select("Muestra biobanco", "biobanco", form_locked, b)
+        persistent_text_input("GDF-15 (pg/mL)", "gdf15", disabled=form_locked, container=a); tri_state_select("Muestra biobanco", "biobanco", form_locked, b)
 
     if clinical_section == section_options[2]:
         st.subheader("Ecocardiografía / elastografía")
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("FEVI (%)", "fevi"), key="fevi", disabled=form_locked); b.text_input(widget_label("GLS", "gls"), key="gls", disabled=form_locked); c.text_input(widget_label("Masa VI", "masa_vi"), key="masa_vi", disabled=form_locked); d.text_input(widget_label("TAPSE", "tapse"), key="tapse", disabled=form_locked)
+        persistent_text_input("FEVI (%)", "fevi", disabled=form_locked, container=a); persistent_text_input("GLS", "gls", disabled=form_locked, container=b); persistent_text_input("Masa VI", "masa_vi", disabled=form_locked, container=c); persistent_text_input("TAPSE", "tapse", disabled=form_locked, container=d)
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("VAI", "vai"), key="vai", disabled=form_locked); b.text_input(widget_label("VCI (cm)", "vci"), key="vci", disabled=form_locked); c.text_input(widget_label("LSM (kPa)", "lsm"), key="lsm", disabled=form_locked); d.text_input(widget_label("CAP (dB/m)", "cap"), key="cap", disabled=form_locked)
+        persistent_text_input("VAI", "vai", disabled=form_locked, container=a); persistent_text_input("VCI (cm)", "vci", disabled=form_locked, container=b); persistent_text_input("LSM (kPa)", "lsm", disabled=form_locked, container=c); persistent_text_input("CAP (dB/m)", "cap", disabled=form_locked, container=d)
         a,b,c,d = st.columns(4)
-        a.text_input(widget_label("Mediciones válidas", "med_val"), key="med_val", disabled=form_locked); b.text_input(widget_label("IQR/Mediana ≤0.30", "iqr_med"), key="iqr_med", disabled=form_locked); c.text_input(widget_label("Días desde descompensación", "dias_desc"), key="dias_desc", disabled=form_locked); d.text_input(widget_label("NT-proBNP día prueba", "nt_prueba"), key="nt_prueba", disabled=form_locked)
+        persistent_text_input("Mediciones válidas", "med_val", disabled=form_locked, container=a); persistent_text_input("IQR/Mediana ≤0.30", "iqr_med", disabled=form_locked, container=b); persistent_text_input("Días desde descompensación", "dias_desc", disabled=form_locked, container=c); persistent_text_input("NT-proBNP día prueba", "nt_prueba", disabled=form_locked, container=d)
         a,b = st.columns(2)
-        a.text_input(widget_label("Categoría fibrosis · solo si documentada", "cat_fibro"), key="cat_fibro", disabled=form_locked); tri_state_select("Edemas día prueba", "edemas_prueba", form_locked, b)
+        persistent_text_input("Categoría fibrosis · solo si documentada", "cat_fibro", disabled=form_locked, container=a); tri_state_select("Edemas día prueba", "edemas_prueba", form_locked, b)
         st.info("LSM y categoría de fibrosis se mantienen separadas. La IA no infiere fibrosis a partir de LSM.")
 
     if clinical_section == section_options[3]:
@@ -958,11 +1053,11 @@ if main_nav == "recogida":
 
     if clinical_section == section_options[4]:
         st.subheader("Seguimiento 24 meses")
-        st.text_input(widget_label("Meses de seguimiento", "meses_seg"), key="meses_seg", disabled=form_locked)
+        persistent_text_input("Meses de seguimiento", "meses_seg", disabled=form_locked)
 
         def render_event_with_date(event_label, event_key, date_label, date_key, container):
             with container:
-                tri_state_select(
+                event_value = tri_state_select(
                     event_label,
                     event_key,
                     form_locked,
@@ -972,8 +1067,10 @@ if main_nav == "recogida":
                 date_input_field(
                     date_label,
                     date_key,
-                    disabled=form_locked or st.session_state.get(event_key, "") != "Sí",
+                    disabled=form_locked or event_value != "Sí",
                 )
+                if event_value != "Sí":
+                    st.caption("La fecha se habilita al seleccionar Sí.")
 
         st.markdown("**Eventos cardiovasculares**")
         a, b = st.columns(2)
