@@ -7,8 +7,8 @@ from io import BytesIO
 import openpyxl
 
 # ============================================================
-# CRD TESIS CARDIORRENAL V3
-# Base central Supabase + exportación Excel
+# CRD TESIS CARDIORRENAL V6
+# Base central Supabase + exportación Excel + control robusto de estado
 # ============================================================
 
 st.set_page_config(page_title="CRD Tesis Cardiorrenal", layout="wide")
@@ -83,6 +83,10 @@ if "loaded_patient_id" not in st.session_state:
     st.session_state.loaded_patient_id = ""
 if "loaded_updated_at" not in st.session_state:
     st.session_state.loaded_updated_at = ""
+if "ui_message" not in st.session_state:
+    st.session_state.ui_message = ""
+if "ui_message_type" not in st.session_state:
+    st.session_state.ui_message_type = ""
 
 
 # ============================================================
@@ -109,7 +113,6 @@ def db_save_patient(data):
 
     data = dict(data)
     data["id_pac"] = patient_id
-    st.session_state.id_pac = patient_id
     now = datetime.now().isoformat()
     old = db_get_patient(patient_id)
     mode = st.session_state.get("form_mode", "new")
@@ -192,6 +195,66 @@ def db_load_patient(patient_id):
     st.session_state.loaded_updated_at = row.get("updated_at", "")
     recalculate_derived_fields()
     return True
+
+def set_ui_message(message, kind="info"):
+    st.session_state.ui_message = message
+    st.session_state.ui_message_type = kind
+
+def handle_load_patient():
+    normalized_search = normalize_patient_id(st.session_state.get("id_pac", ""))
+    if not normalized_search:
+        set_ui_message("Introduce primero una ID de paciente.", "warning")
+        return
+    if db_load_patient(normalized_search):
+        set_ui_message(f"Paciente {normalized_search} cargado desde la base central.", "success")
+    else:
+        set_ui_message(
+            f"El paciente {normalized_search} no existe en la base de datos. "
+            "Pulsa 'Nuevo paciente' para crear una ficha nueva.",
+            "warning"
+        )
+
+def handle_new_patient():
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
+    st.session_state.last_ai_data = {}
+    st.session_state.form_mode = "new"
+    st.session_state.loaded_patient_id = ""
+    st.session_state.loaded_updated_at = ""
+    set_ui_message("Formulario preparado para un paciente nuevo.", "info")
+
+def handle_save_patient():
+    normalized_id = normalize_patient_id(st.session_state.get("id_pac", ""))
+    if not normalized_id:
+        set_ui_message("El ID de paciente es obligatorio.", "error")
+        return
+
+    warnings_now = validation_warnings()
+    if warnings_now:
+        set_ui_message("Corrige primero los valores fuera de rango.", "error")
+        return
+
+    recalculate_derived_fields()
+    data = {k: st.session_state.get(k, DEFAULTS[k]) for k in DEFAULTS}
+    data["id_pac"] = normalized_id
+
+    try:
+        ok, mode = db_save_patient(data)
+        if ok:
+            set_ui_message(
+                f"Paciente {data['id_pac']} {mode} correctamente en la BASE CENTRAL.",
+                "success"
+            )
+    except Exception as e:
+        msg = str(e)
+        if "DUPLICADO" in msg:
+            set_ui_message(
+                f"⚠️ El paciente {normalized_id} ya existe en la base de datos. "
+                "No se ha modificado nada. Cárgalo para poder editarlo.",
+                "warning"
+            )
+        else:
+            set_ui_message(f"No se pudo guardar en la base central: {e}", "error")
 
 def db_recent(limit=20):
     return supabase.table("patients").select(
@@ -353,7 +416,7 @@ Texto clínico:
 def apply_ai(data):
     changes = []
     for k, v in data.items():
-        if k not in DEFAULTS or k in DERIVED_FIELDS or v is None or str(v).strip() == "":
+        if k not in DEFAULTS or k in DERIVED_FIELDS or k == "id_pac" or v is None or str(v).strip() == "":
             continue
         if k in {
             "dm2","hta","fa","epoc","sd_metab","tabaco","enolismo","hepato",
@@ -470,27 +533,24 @@ with top1:
     )
 
 with top2:
-    if st.button("🔍 Cargar paciente", use_container_width=True):
-        normalized_search = normalize_patient_id(st.session_state.get("id_pac", ""))
-        st.session_state.id_pac = normalized_search
-        if normalized_search:
-            if db_load_patient(normalized_search):
-                st.success("Paciente cargado desde la base central.")
-                st.rerun()
-            else:
-                st.warning("Ese ID no existe. Pulsa 'Nuevo paciente' para crear una ficha nueva.")
-        else:
-            st.warning("Introduce primero una ID de paciente.")
+    st.button("🔍 Cargar paciente", use_container_width=True, on_click=handle_load_patient)
 
 with top3:
-    if st.button("🔄 Nuevo paciente", use_container_width=True):
-        for k, v in DEFAULTS.items():
-            st.session_state[k] = v
-        st.session_state.last_ai_data = {}
-        st.session_state.form_mode = "new"
-        st.session_state.loaded_patient_id = ""
-        st.session_state.loaded_updated_at = ""
-        st.rerun()
+    st.button("🔄 Nuevo paciente", use_container_width=True, on_click=handle_new_patient)
+
+if st.session_state.ui_message:
+    kind = st.session_state.ui_message_type
+    message = st.session_state.ui_message
+    st.session_state.ui_message = ""
+    st.session_state.ui_message_type = ""
+    if kind == "success":
+        st.success(message)
+    elif kind == "warning":
+        st.warning(message)
+    elif kind == "error":
+        st.error(message)
+    else:
+        st.info(message)
 
 
 mode_label = "EDICIÓN: paciente cargado" if st.session_state.form_mode == "edit" else "NUEVO PACIENTE"
@@ -674,27 +734,12 @@ if warnings:
 c1,c2,c3 = st.columns(3)
 
 with c1:
-    if st.button("💾 GUARDAR EN BASE CENTRAL", type="primary", use_container_width=True):
-        normalized_id = normalize_patient_id(st.session_state.get("id_pac", ""))
-        st.session_state.id_pac = normalized_id
-
-        if not normalized_id:
-            st.error("El ID de paciente es obligatorio.")
-        elif warnings:
-            st.error("Corrige primero los valores fuera de rango.")
-        else:
-            recalculate_derived_fields()
-            data = {k: st.session_state.get(k, DEFAULTS[k]) for k in DEFAULTS}
-            data["id_pac"] = normalized_id
-            try:
-                ok, mode = db_save_patient(data)
-                if ok:
-                    st.success(
-                        f"Paciente {data['id_pac']} {mode} en la BASE CENTRAL."
-                    )
-                    st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo guardar en la base central: {e}")
+    st.button(
+        "💾 GUARDAR EN BASE CENTRAL",
+        type="primary",
+        use_container_width=True,
+        on_click=handle_save_patient
+    )
 
 with c2:
     try:
