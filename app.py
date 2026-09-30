@@ -87,6 +87,10 @@ if "ui_message" not in st.session_state:
     st.session_state.ui_message = ""
 if "ui_message_type" not in st.session_state:
     st.session_state.ui_message_type = ""
+if "id_exists" not in st.session_state:
+    st.session_state.id_exists = False
+if "id_checked" not in st.session_state:
+    st.session_state.id_checked = ""
 
 
 # ============================================================
@@ -105,6 +109,20 @@ def db_count():
 
 def normalize_patient_id(value):
     return str(value or "").strip().upper()
+
+def check_id_exists():
+    """Comprueba la ID en cuanto el usuario sale del campo de ID."""
+    patient_id = normalize_patient_id(st.session_state.get("id_pac", ""))
+    st.session_state.id_pac = patient_id
+    st.session_state.id_checked = patient_id
+    if not patient_id or st.session_state.get("form_mode", "new") != "new":
+        st.session_state.id_exists = False
+        return
+    try:
+        st.session_state.id_exists = db_get_patient(patient_id) is not None
+    except Exception:
+        # No bloqueamos la interfaz por un error transitorio de red.
+        st.session_state.id_exists = False
 
 def db_save_patient(data):
     patient_id = normalize_patient_id(data.get("id_pac", ""))
@@ -193,6 +211,8 @@ def db_load_patient(patient_id):
     st.session_state.form_mode = "edit"
     st.session_state.loaded_patient_id = patient_id
     st.session_state.loaded_updated_at = row.get("updated_at", "")
+    st.session_state.id_exists = False
+    st.session_state.id_checked = patient_id
     recalculate_derived_fields()
     return True
 
@@ -221,6 +241,8 @@ def handle_new_patient():
     st.session_state.form_mode = "new"
     st.session_state.loaded_patient_id = ""
     st.session_state.loaded_updated_at = ""
+    st.session_state.id_exists = False
+    st.session_state.id_checked = ""
     set_ui_message("Formulario preparado para un paciente nuevo.", "info")
 
 def handle_save_patient():
@@ -248,6 +270,8 @@ def handle_save_patient():
     except Exception as e:
         msg = str(e)
         if "DUPLICADO" in msg:
+            st.session_state.id_exists = True
+            st.session_state.id_checked = normalized_id
             set_ui_message(
                 f"⚠️ El paciente {normalized_id} ya existe en la base de datos. "
                 "No se ha modificado nada. Cárgalo para poder editarlo.",
@@ -529,7 +553,8 @@ with top1:
     st.text_input(
         "ID paciente",
         key="id_pac",
-        help="Esta es la única casilla para introducir la ID. Para editar un paciente existente, escribe su ID y pulsa Cargar paciente."
+        on_change=check_id_exists,
+        help="Escribe la ID. Al salir del campo se comprueba inmediatamente si ese paciente ya existe."
     )
 
 with top2:
@@ -537,6 +562,19 @@ with top2:
 
 with top3:
     st.button("🔄 Nuevo paciente", use_container_width=True, on_click=handle_new_patient)
+
+# Aviso inmediato: se muestra antes de que el usuario tenga que rellenar el formulario.
+if (
+    st.session_state.form_mode == "new"
+    and st.session_state.id_exists
+    and normalize_patient_id(st.session_state.get("id_pac", "")) == st.session_state.get("id_checked", "")
+):
+    existing_id = st.session_state.id_checked
+    st.warning(
+        f"⚠️ El paciente **{existing_id} ya existe** en la base de datos. "
+        "Si quieres modificarlo, pulsa **🔍 Cargar paciente**. "
+        "Si quieres crear uno nuevo, utiliza otra ID."
+    )
 
 if st.session_state.ui_message:
     kind = st.session_state.ui_message_type
@@ -734,11 +772,17 @@ if warnings:
 c1,c2,c3 = st.columns(3)
 
 with c1:
+    duplicate_new = (
+        st.session_state.form_mode == "new"
+        and st.session_state.id_exists
+        and normalize_patient_id(st.session_state.get("id_pac", "")) == st.session_state.get("id_checked", "")
+    )
     st.button(
         "💾 GUARDAR EN BASE CENTRAL",
         type="primary",
         use_container_width=True,
-        on_click=handle_save_patient
+        on_click=handle_save_patient,
+        disabled=duplicate_new
     )
 
 with c2:
