@@ -644,7 +644,7 @@ CLAVES PERMITIDAS
 {json.dumps(AI_SCHEMA_TEXT, ensure_ascii=False, indent=2)}
 
 TEXTO CLÍNICO
-{text}
+{texto}
 """
 
     try:
@@ -654,7 +654,6 @@ TEXTO CLÍNICO
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                temperature=0,
                 max_output_tokens=6000,
             ),
         )
