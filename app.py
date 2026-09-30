@@ -17,7 +17,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# CRD TESIS CARDIORRENAL — V12 ESTABLE
+# CRD TESIS CARDIORRENAL — V15 ESTABLE
 # Interfaz clínica + Supabase central + Gemini + Dashboard
 # ============================================================
 
@@ -237,6 +237,7 @@ for state_key, initial in {
     "ui_message": "", "ui_message_type": "info", "last_ai_data": {}, "ai_changed_keys": [], "clinical_text": "",
     "ai_model_used": "", "dashboard_cache": [], "patient_search": "", "selected_patient_row": "",
     "history_patient_id": "", "pending_delete_id": "", "patients_page": 1,
+    "validation_errors": [],
 }.items():
     if state_key not in st.session_state:
         st.session_state[state_key] = initial
@@ -487,18 +488,94 @@ def handle_event_change(event_key, date_key):
 
 
 def validation_warnings():
+    """Detect only obvious data-entry mistakes, not abnormal clinical values.
+
+    These limits are intentionally broad plausibility/sanity checks. They are NOT
+    reference intervals, normality ranges, severity thresholds or diagnostic cut-offs.
+    The aim is to catch gazapos such as age=2000 or creatinine=234 when the field is
+    being entered in the CRD's expected units, while allowing genuinely extreme
+    clinical values (e.g. heavy proteinuria/protein-creatinine values).
+    """
     warnings = []
-    ranges = {
-        "edad": (0, 120), "peso": (1, 500), "talla": (30, 250), "hb": (1, 30), "creat": (0.1, 30), "fge": (0, 200),
-        "fevi": (0, 100), "tapse": (0, 50), "lsm": (0, 100), "cap": (0, 1000), "plaq": (1, 2000), "meses_seg": (0, 120),
+    sanity_checks = {
+        # Identifying / anthropometric data: only absurd values should trigger.
+        "edad": (0, 120, "años"),
+        "peso": (1, 400, "kg"),
+        "talla": (30, 250, "cm"),
+
+        # Basic laboratory data: broad enough for severe disease, but catches
+        # obvious unit/decimal/key-entry mistakes.
+        "hb": (2, 25, "g/dL"),
+        "creat": (0.05, 40, "mg/dL"),
+        "cist_c": (0.05, 20, "unidad del CRD"),
+        "fge": (0, 250, "mL/min/1,73 m²"),
+        "urea": (0, 600, "unidad del CRD"),
+        "ac_urico": (0, 30, "mg/dL"),
+        # Prot/Creat is deliberately NOT capped tightly: values in the thousands
+        # may be perfectly compatible with severe proteinuria/proteinuria.
+        "prot_creat": (0, 100000, "unidad del CRD"),
+        "ast": (0, 20000, "U/L"),
+        "alt": (0, 20000, "U/L"),
+        "plaq": (1, 5000, "x10⁹/L"),
+        "bili_t": (0, 60, "mg/dL"),
+        "bili_d": (0, 40, "mg/dL"),
+        "albumina": (0.5, 10, "g/dL"),
+        "hba1c": (2, 25, "%"),
+        "colest": (20, 1500, "mg/dL"),
+        "nt_probnp": (0, 1000000, "pg/mL"),
+        "ca125": (0, 250000, "U/mL"),
+        "gal3": (0, 500, "unidad del CRD"),
+        "sst2": (0, 500, "unidad del CRD"),
+        "gdf15": (0, 500000, "pg/mL"),
+
+        # Echo / elastography: broad physical plausibility limits, not normality.
+        "fevi": (0, 100, "%"),
+        "gls": (-60, 20, "%"),
+        "masa_vi": (1, 3000, "g"),
+        "tapse": (0, 60, "mm"),
+        "vai": (1, 200, "unidad del CRD"),
+        "vci": (0.1, 10, "cm"),
+        "lsm": (0, 100, "kPa"),
+        "cap": (0, 1000, "dB/m"),
+        "med_val": (0, 50, "mediciones"),
+        "iqr_med": (0, 2, "adimensional"),
+        "dias_desc": (0, 10000, "días"),
+        "nt_prueba": (0, 1000000, "pg/mL"),
+
+        # Follow-up: study window with a margin, only to catch obvious typos.
+        "meses_seg": (0, 36, "meses"),
     }
-    for key, (lo, hi) in ranges.items():
+    ranges = sanity_checks
+    section_by_key = {
+        "edad": "Datos clínicos", "peso": "Datos clínicos", "talla": "Datos clínicos",
+        "hb": "Analítica / biomarcadores", "creat": "Analítica / biomarcadores",
+        "fge": "Analítica / biomarcadores", "plaq": "Analítica / biomarcadores",
+        "fevi": "Ecocardiografía / elastografía", "tapse": "Ecocardiografía / elastografía",
+        "lsm": "Ecocardiografía / elastografía", "cap": "Ecocardiografía / elastografía",
+        "meses_seg": "Seguimiento 24 m",
+    }
+    for key, (lo, hi, unit) in ranges.items():
         value = st.session_state.get(key, "")
-        if value not in ("", None):
-            number = _to_float(value)
-            if number is not None and (number < lo or number > hi):
-                warnings.append(f"{FIELD_LABELS.get(key, key)}: {value} fuera del rango de comprobación ({lo}–{hi}).")
+        if value in ("", None):
+            continue
+        number = _to_float(value)
+        label = FIELD_LABELS.get(key, key)
+        section = section_by_key.get(key, "")
+        where = f" · {section}" if section else ""
+        if number is None:
+            warnings.append({
+                "key": key,
+                "kind": "non_numeric",
+                "text": f"{label}{where}: «{value}» no es un valor numérico válido.",
+            })
+        elif number < lo or number > hi:
+            warnings.append({
+                "key": key,
+                "kind": "out_of_range",
+                "text": f"{label}{where}: {value} {unit} supera el control de plausibilidad configurado ({lo:g}–{hi:g} {unit}). Es un control para detectar posibles gazapos, no una valoración de normalidad clínica.",
+            })
     return warnings
+
 
 # ============================================================
 # CRUD CALLBACKS
@@ -527,16 +604,33 @@ def db_save_patient(data):
             raise ValueError("La ID del paciente cargado no coincide.")
         loaded_at = st.session_state.get("loaded_updated_at", "")
         current_at = old.get("updated_at", "")
-        if loaded_at and current_at and loaded_at != current_at:
-            raise ValueError("Este paciente ha sido modificado por otro usuario desde que lo cargaste. Vuelve a cargarlo antes de guardar.")
+
+        def _timestamp_token(value):
+            if not value:
+                return ""
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC_TZ)
+                return parsed.astimezone(UTC_TZ).isoformat(timespec="microseconds")
+            except Exception:
+                return str(value)
+
+        # Compare real instants, not their textual timezone representation.
+        # This avoids false conflicts such as +02:00 vs +00:00 after a save.
+        if loaded_at and current_at and _timestamp_token(loaded_at) != _timestamp_token(current_at):
+            raise ValueError("CONFLICTO:Este paciente ha sido modificado por otro usuario desde que lo cargaste. Vuelve a cargarlo antes de guardar.")
         res = supabase.table("patients").update({"data": data, "updated_at": now, "updated_by": st.session_state.get("user_label", "usuario")}).eq("id_pac", patient_id).select("*").execute()
         action, result_label = "UPDATE", "actualizado"
     if not res.data:
         raise ValueError("Supabase no devolvió el registro guardado.")
-    supabase.table("audit_log").insert({"id_pac": patient_id, "action": action, "snapshot": data, "changed_at": now, "changed_by": st.session_state.get("user_label", "usuario")}).execute()
+    saved_row = res.data[0]
+    saved_at = saved_row.get("updated_at") or now
+    supabase.table("audit_log").insert({"id_pac": patient_id, "action": action, "snapshot": data, "changed_at": saved_at, "changed_by": st.session_state.get("user_label", "usuario")}).execute()
     st.session_state.form_mode = "edit"
     st.session_state.loaded_patient_id = patient_id
-    st.session_state.loaded_updated_at = now
+    # Store exactly the timestamp returned by Supabase, not the local Madrid string.
+    st.session_state.loaded_updated_at = saved_at
     st.session_state.id_exists = True
     st.session_state.id_checked = patient_id
     return result_label
@@ -562,6 +656,7 @@ def db_load_patient(patient_id):
     st.session_state.id_exists = True
     st.session_state.id_checked = normalize_patient_id(patient_id)
     st.session_state.ai_changed_keys = []
+    st.session_state.validation_errors = []
     recalculate_derived_fields()
     return True
 
@@ -588,6 +683,7 @@ def reset_patient_state():
     st.session_state.clinical_text = ""
     st.session_state[_widget_key("clinical_text")] = ""
     st.session_state.ai_model_used = ""
+    st.session_state.validation_errors = []
 
 
 def handle_new_patient():
@@ -596,6 +692,7 @@ def handle_new_patient():
 
 
 def handle_id_change():
+    st.session_state.validation_errors = []
     pid = normalize_patient_id(st.session_state.get(_widget_key("id_pac"), ""))
     st.session_state[_widget_key("id_pac")] = pid
     st.session_state.id_pac = pid
@@ -626,8 +723,9 @@ def handle_save_patient():
         return
     recalculate_derived_fields()
     warnings = validation_warnings()
+    st.session_state.validation_errors = warnings
     if warnings:
-        set_ui_message("Hay valores fuera de rango. Revísalos antes de guardar.", "error")
+        set_ui_message(f"Hay {len(warnings)} dato(s) que deben revisarse antes de guardar.", "error")
         return
     data = {k: st.session_state.get(k, DEFAULTS[k]) for k in DEFAULTS}
     data["id_pac"] = pid
@@ -638,6 +736,8 @@ def handle_save_patient():
         msg = str(e)
         if msg.startswith("DUPLICADO:"):
             set_ui_message(f"⚠️ El paciente {pid} ya existe en la base de datos. No se ha modificado nada. Pulsa 'Cargar paciente' para editarlo.", "warning")
+        elif msg.startswith("CONFLICTO:"):
+            set_ui_message("⚠️ El paciente ha cambiado en la base central desde que lo cargaste. No se han sobrescrito esos cambios. Vuelve a cargarlo y aplica de nuevo las modificaciones.", "warning")
         else:
             set_ui_message(f"No se pudo guardar en la base central: {e}", "error")
 
@@ -1177,6 +1277,13 @@ if main_nav == "recogida":
         render_event_with_date("Síndrome cardiorrenal agudo", "sd_cr", "Fecha Sd. CR agudo", "f_sd_cr", b)
 
     recalculate_derived_fields()
+    live_validation = validation_warnings()
+    st.session_state.validation_errors = live_validation
+    if live_validation:
+        st.error(f"⚠️ Hay {len(live_validation)} dato(s) que debes revisar antes de guardar")
+        for item in live_validation:
+            st.markdown(f"- **{item['text']}**")
+        st.caption("Estos límites son controles amplios de plausibilidad para detectar posibles gazapos de introducción. No son rangos de normalidad, límites clínicos ni puntos de corte diagnósticos.")
     st.markdown("### Revisión antes de guardar")
     missing = []
     for title, fields in SECTION_FIELDS.items():
@@ -1190,7 +1297,7 @@ if main_nav == "recogida":
         st.caption("Pendientes: " + " · ".join(f"{x} ({n})" for x,n in missing))
     else:
         st.success("Ficha completa según las variables monitorizadas.")
-    save_disabled = form_locked or not current_id or (st.session_state.form_mode == "new" and st.session_state.id_exists)
+    save_disabled = form_locked or not current_id or (st.session_state.form_mode == "new" and st.session_state.id_exists) or bool(live_validation)
     s1,s2 = st.columns([2,1])
     with s1: st.button("💾 GUARDAR PACIENTE", type="primary", use_container_width=True, on_click=handle_save_patient, disabled=save_disabled)
     with s2:
