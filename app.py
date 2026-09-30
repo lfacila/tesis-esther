@@ -1,7 +1,8 @@
 import json
 import math
 import re
-from datetime import datetime
+import time
+from datetime import datetime, date
 from io import BytesIO
 
 import openpyxl
@@ -189,6 +190,17 @@ SECTION_FIELDS = {
 
 DERIVED_FIELDS = {"imc", "fib4", "mace_plus"}
 
+DATE_FIELDS = {
+    "fecha_inc", "f_m_cv", "f_hosp_ic", "f_iam", "f_acv", "f_m_tot",
+    "f_trs", "f_caida_fge", "f_sd_cr",
+}
+
+AI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+]
+
 if "form_mode" not in st.session_state:
     st.session_state.form_mode = "new"  # new | edit
 if "loaded_patient_id" not in st.session_state:
@@ -209,10 +221,17 @@ if "ai_changed_keys" not in st.session_state:
     st.session_state.ai_changed_keys = []
 if "clinical_text" not in st.session_state:
     st.session_state.clinical_text = ""
+if "ai_model_used" not in st.session_state:
+    st.session_state.ai_model_used = ""
 
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+for _date_key in DATE_FIELDS:
+    _widget_key = f"_date_{_date_key}"
+    if _widget_key not in st.session_state:
+        st.session_state[_widget_key] = None
 
 
 # ============================================================
@@ -252,6 +271,41 @@ def db_audit(patient_id, limit=20):
     ).eq("id_pac", normalize_patient_id(patient_id)).order(
         "changed_at", desc=True
     ).limit(limit).execute().data or []
+
+
+def parse_date_value(value):
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def set_date_widget_state(key, value):
+    st.session_state[f"_date_{key}"] = parse_date_value(value)
+
+
+def sync_date_field(key, value):
+    st.session_state[key] = value.isoformat() if value else ""
+
+
+def date_input_field(label, key, disabled=False, container=None):
+    target = container if container is not None else st
+    widget_key = f"_date_{key}"
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = parse_date_value(st.session_state.get(key, ""))
+    selected = target.date_input(
+        widget_label(label, key),
+        key=widget_key,
+        format="DD/MM/YYYY",
+        disabled=disabled,
+    )
+    sync_date_field(key, selected)
+    return selected
 
 
 def db_save_patient(data):
@@ -331,6 +385,8 @@ def db_load_patient(patient_id):
     data = row.get("data") or {}
     for k in DEFAULTS:
         st.session_state[k] = data.get(k, DEFAULTS[k])
+    for key in DATE_FIELDS:
+        set_date_widget_state(key, st.session_state.get(key, ""))
     st.session_state.id_pac = normalize_patient_id(patient_id)
     st.session_state.form_mode = "edit"
     st.session_state.loaded_patient_id = normalize_patient_id(patient_id)
@@ -350,6 +406,8 @@ def set_ui_message(message, kind="info"):
 def reset_patient_state():
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
+    for key in DATE_FIELDS:
+        set_date_widget_state(key, "")
     st.session_state.form_mode = "new"
     st.session_state.loaded_patient_id = ""
     st.session_state.loaded_updated_at = ""
@@ -615,6 +673,37 @@ def normalize_yes_no(value):
     return str(value).strip()
 
 
+def is_transient_gemini_error(exc):
+    msg = str(exc).upper()
+    return any(token in msg for token in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL"))
+
+
+def generate_gemini_json(client, prompt):
+    from google.genai import types
+
+    last_error = None
+    for idx, model in enumerate(AI_MODELS):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=6000,
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
+                ),
+            )
+            return response, model
+        except Exception as exc:
+            last_error = exc
+            if not is_transient_gemini_error(exc) or idx == len(AI_MODELS) - 1:
+                raise
+            # El SDK oficial ya aplica reintentos automáticos para errores transitorios.
+            # Aquí cambiamos de modelo solo si sigue ocupado/no disponible.
+            time.sleep(1.5)
+    raise last_error
+
+
 def extract_ai(texto):
     client = cached_gemini_client(GEMINI_API_KEY)
     prompt = f"""
@@ -648,15 +737,7 @@ TEXTO CLÍNICO
 """
 
     try:
-        from google.genai import types
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                max_output_tokens=6000,
-            ),
-        )
+        response, model_used = generate_gemini_json(client, prompt)
         raw = (response.text or "").strip()
         if not raw:
             raise ValueError("Gemini devolvió una respuesta vacía.")
@@ -665,9 +746,16 @@ TEXTO CLÍNICO
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("La respuesta de Gemini no es un objeto JSON.")
+        st.session_state.ai_model_used = model_used
         return {k: v for k, v in data.items() if k in DEFAULTS and k not in DERIVED_FIELDS and k != "id_pac"}
     except Exception as e:
-        st.error(f"Error al extraer datos con Gemini: {e}")
+        if is_transient_gemini_error(e):
+            st.error(
+                "Gemini está temporalmente saturado. La aplicación ha intentado varios modelos. "
+                "Espera unos segundos y vuelve a pulsar 'Extraer datos con IA'."
+            )
+        else:
+            st.error(f"Error al extraer datos con Gemini: {e}")
         return None
 
 
@@ -878,7 +966,8 @@ with left:
             if result is not None:
                 changes = apply_ai(result)
                 if changes:
-                    st.success(f"{len(changes)} campos propuestos por IA. Revísalos antes de guardar.")
+                    model_note = f" · modelo {st.session_state.ai_model_used}" if st.session_state.ai_model_used else ""
+                    st.success(f"{len(changes)} campos propuestos por IA{model_note}. Revísalos antes de guardar.")
                 else:
                     st.info("La IA no encontró nuevos datos explícitos que añadir.")
                 st.rerun()
@@ -892,6 +981,8 @@ with right:
         )
     else:
         st.caption("Los campos propuestos por IA aparecen marcados con 🤖.")
+    if st.session_state.ai_model_used:
+        st.caption(f"Última extracción IA: {st.session_state.ai_model_used}")
 
     if st.session_state.last_ai_data:
         with st.expander("Ver respuesta estructurada de IA"):
@@ -911,7 +1002,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(section_titles)
 with tab1:
     st.subheader("Datos basales")
     a, b, c = st.columns(3)
-    a.text_input(widget_label("Fecha inclusión", "fecha_inc"), key="fecha_inc", disabled=form_locked)
+    date_input_field("Fecha inclusión", "fecha_inc", form_locked, a)
     b.selectbox(widget_label("Sexo", "sexo"), ["", "H", "M"], key="sexo", disabled=form_locked,
                 format_func=lambda x: "— No recogido —" if x == "" else x)
     c.text_input(widget_label("Edad", "edad"), key="edad", disabled=form_locked)
@@ -1023,21 +1114,21 @@ with tab5:
     with a:
         tri_state_select("Muerte cardiovascular", "m_cv", form_locked, a)
         if st.session_state.m_cv == "Sí":
-            st.text_input("Fecha muerte CV", key="f_m_cv", disabled=form_locked)
+            date_input_field("Fecha muerte CV", "f_m_cv", form_locked)
     with b:
         tri_state_select("Hospitalización por IC descompensada", "hosp_ic", form_locked, b)
         if st.session_state.hosp_ic == "Sí":
-            st.text_input("Fecha hospitalización IC", key="f_hosp_ic", disabled=form_locked)
+            date_input_field("Fecha hospitalización IC", "f_hosp_ic", form_locked)
 
     a, b = st.columns(2)
     with a:
         tri_state_select("IAM no fatal", "iam", form_locked, a)
         if st.session_state.iam == "Sí":
-            st.text_input("Fecha IAM", key="f_iam", disabled=form_locked)
+            date_input_field("Fecha IAM", "f_iam", form_locked)
     with b:
         tri_state_select("ACV no fatal", "acv", form_locked, b)
         if st.session_state.acv == "Sí":
-            st.text_input("Fecha ACV", key="f_acv", disabled=form_locked)
+            date_input_field("Fecha ACV", "f_acv", form_locked)
 
     st.info(f"**MACE+ (calculado):** {calculate_mace_plus() or '— no determinable con los datos actuales —'}")
 
@@ -1046,20 +1137,20 @@ with tab5:
     with a:
         tri_state_select("Muerte total", "m_tot", form_locked, a)
         if st.session_state.m_tot == "Sí":
-            st.text_input("Fecha muerte total", key="f_m_tot", disabled=form_locked)
+            date_input_field("Fecha muerte total", "f_m_tot", form_locked)
     with b:
         tri_state_select("Inicio TRS (diálisis/trasplante)", "trs", form_locked, b)
         if st.session_state.trs == "Sí":
-            st.text_input("Fecha inicio TRS", key="f_trs", disabled=form_locked)
+            date_input_field("Fecha inicio TRS", "f_trs", form_locked)
     a, b = st.columns(2)
     with a:
         tri_state_select("Caída FGe ≥25%", "caida_fge", form_locked, a)
         if st.session_state.caida_fge == "Sí":
-            st.text_input("Fecha caída FGe", key="f_caida_fge", disabled=form_locked)
+            date_input_field("Fecha caída FGe", "f_caida_fge", form_locked)
     with b:
         tri_state_select("Síndrome cardiorrenal agudo", "sd_cr", form_locked, b)
         if st.session_state.sd_cr == "Sí":
-            st.text_input("Fecha Sd. CR agudo", key="f_sd_cr", disabled=form_locked)
+            date_input_field("Fecha Sd. CR agudo", "f_sd_cr", form_locked)
 
 # Recalcular después de renderizar valores modificables.
 recalculate_derived_fields()
