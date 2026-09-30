@@ -47,12 +47,13 @@ except Exception as e:
 # ---------- Variables ----------
 DEFAULTS = {
     "id_pac": "", "fecha_inc": datetime.today().strftime("%d/%m/%Y"),
-    "edad": "", "sexo": "", "peso": "", "talla": "", "eti_erc": "", "eti_ic": "",
+    "edad": "", "sexo": "", "peso": "", "talla": "", "imc": "",
+    "eti_erc": "", "eti_ic": "",
     "dm2": "No", "hta": "No", "fa": "No", "epoc": "No", "sd_metab": "No",
     "tabaco": "No", "enolismo": "No", "hepato": "No",
     "hb": "", "creat": "", "cist_c": "", "fge": "", "urea": "", "ac_urico": "",
     "prot_creat": "", "ast": "", "alt": "", "plaq": "", "bili_t": "", "bili_d": "",
-    "albumina": "", "hba1c": "", "colest": "", "nt_probnp": "", "ca125": "",
+    "albumina": "", "hba1c": "", "colest": "", "fib4": "", "nt_probnp": "", "ca125": "",
     "gal3": "", "sst2": "", "gdf15": "", "biobanco": "No",
     "fevi": "", "gls": "", "masa_vi": "", "tapse": "", "vai": "", "vci": "",
     "lsm": "", "cat_fibro": "", "cap": "", "med_val": "", "iqr_med": "",
@@ -76,6 +77,12 @@ if "last_ai_data" not in st.session_state:
     st.session_state.last_ai_data = {}
 if "audit_log" not in st.session_state:
     st.session_state.audit_log = []
+if "form_mode" not in st.session_state:
+    st.session_state.form_mode = "new"  # new | edit
+if "loaded_patient_id" not in st.session_state:
+    st.session_state.loaded_patient_id = ""
+if "loaded_updated_at" not in st.session_state:
+    st.session_state.loaded_updated_at = ""
 
 
 # ============================================================
@@ -92,11 +99,22 @@ def db_count():
     res = supabase.table("patients").select("id_pac", count="exact").execute()
     return res.count if res.count is not None else len(res.data or [])
 
-def db_upsert_patient(data):
-    patient_id = str(data["id_pac"]).strip()
-    now = datetime.now().isoformat()
+def normalize_patient_id(value):
+    return str(value or "").strip().upper()
 
+def db_save_patient(data):
+    patient_id = normalize_patient_id(data.get("id_pac", ""))
+    if not patient_id:
+        raise ValueError("El ID de paciente es obligatorio.")
+
+    data = dict(data)
+    data["id_pac"] = patient_id
+    st.session_state.id_pac = patient_id
+    now = datetime.now().isoformat()
     old = db_get_patient(patient_id)
+    mode = st.session_state.get("form_mode", "new")
+    loaded_id = normalize_patient_id(st.session_state.get("loaded_patient_id", ""))
+
     payload = {
         "id_pac": patient_id,
         "data": data,
@@ -104,18 +122,60 @@ def db_upsert_patient(data):
         "updated_by": st.session_state.get("user_label", "usuario")
     }
 
-    res = supabase.table("patients").upsert(payload, on_conflict="id_pac").execute()
+    if mode == "new":
+        if old:
+            raise ValueError(
+                f"DUPLICADO: la ID {patient_id} ya existe en la base. "
+                "Pulsa 'Cargar paciente' para editarlo; no se creará una segunda ficha."
+            )
+        res = supabase.table("patients").insert(payload).select("*").single().execute()
+        action = "CREATE"
+        result_label = "creado"
+    else:
+        if not old:
+            raise ValueError(
+                f"La ID {patient_id} ya no existe en la base. Vuelve a 'Nuevo paciente' para crearla."
+            )
+        if loaded_id != patient_id:
+            raise ValueError(
+                "Has cambiado la ID después de cargar un paciente. "
+                "Para crear otra ficha pulsa 'Nuevo paciente'."
+            )
+        loaded_at = st.session_state.get("loaded_updated_at", "")
+        current_at = old.get("updated_at", "")
+        if loaded_at and current_at and loaded_at != current_at:
+            raise ValueError(
+                "Este paciente ha sido modificado por otro usuario desde que lo cargaste. "
+                "Vuelve a cargarlo antes de guardar para evitar sobrescribir cambios."
+            )
+        res = (
+            supabase.table("patients")
+            .update({
+                "data": data,
+                "updated_at": now,
+                "updated_by": st.session_state.get("user_label", "usuario")
+            })
+            .eq("id_pac", patient_id)
+            .select("*")
+            .single()
+            .execute()
+        )
+        action = "UPDATE"
+        result_label = "actualizado"
 
-    # Audit record: store complete snapshot + timestamp.
+    # Audit record: full snapshot + timestamp.
     supabase.table("audit_log").insert({
         "id_pac": patient_id,
-        "action": "UPDATE" if old else "CREATE",
+        "action": action,
         "snapshot": data,
         "changed_at": now,
         "changed_by": st.session_state.get("user_label", "usuario")
     }).execute()
 
-    return bool(res.data), ("actualizado" if old else "nuevo")
+    st.session_state.form_mode = "edit"
+    st.session_state.loaded_patient_id = patient_id
+    st.session_state.loaded_updated_at = now
+    return bool(res.data), result_label
 
 def db_load_patient(patient_id):
     row = db_get_patient(patient_id)
@@ -127,7 +187,10 @@ def db_load_patient(patient_id):
         st.session_state[k] = data.get(k, DEFAULTS[k])
 
     st.session_state.id_pac = patient_id
+    st.session_state.form_mode = "edit"
+    st.session_state.loaded_patient_id = patient_id
     st.session_state.loaded_updated_at = row.get("updated_at", "")
+    recalculate_derived_fields()
     return True
 
 def db_recent(limit=20):
@@ -141,6 +204,50 @@ def db_audit(patient_id, limit=20):
     ).eq("id_pac", patient_id).order(
         "changed_at", desc=True
     ).limit(limit).execute().data or []
+
+
+# ============================================================
+# VARIABLES DERIVADAS
+# ============================================================
+
+DERIVED_FIELDS = {"imc", "fib4"}
+
+
+def _to_float(value):
+    try:
+        s = str(value).strip().replace(",", ".")
+        if s in ("", "None", "nan"):
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def calculate_imc():
+    peso = _to_float(st.session_state.get("peso", ""))
+    talla_cm = _to_float(st.session_state.get("talla", ""))
+    if peso is None or talla_cm is None or peso <= 0 or talla_cm <= 0:
+        return ""
+    talla_m = talla_cm / 100.0
+    return f"{peso / (talla_m ** 2):.1f}"
+
+
+def calculate_fib4():
+    edad = _to_float(st.session_state.get("edad", ""))
+    ast = _to_float(st.session_state.get("ast", ""))
+    alt = _to_float(st.session_state.get("alt", ""))
+    plaq = _to_float(st.session_state.get("plaq", ""))
+    if any(v is None for v in (edad, ast, alt, plaq)):
+        return ""
+    if edad < 0 or ast <= 0 or alt <= 0 or plaq <= 0:
+        return ""
+    # FIB-4 = (edad x AST) / (plaquetas x sqrt(ALT))
+    return f"{(edad * ast) / (plaq * (alt ** 0.5)):.2f}"
+
+
+def recalculate_derived_fields():
+    st.session_state["imc"] = calculate_imc()
+    st.session_state["fib4"] = calculate_fib4()
 
 
 # ============================================================
@@ -175,7 +282,7 @@ def validation_warnings():
 # IA
 # ============================================================
 
-AI_KEYS = list(DEFAULTS.keys())
+AI_KEYS = [k for k in DEFAULTS.keys() if k not in DERIVED_FIELDS]
 
 AI_SCHEMA = {k: "valor explícito o null" for k in AI_KEYS}
 for k in ["dm2","hta","fa","epoc","sd_metab","tabaco","enolismo","hepato",
@@ -246,7 +353,7 @@ Texto clínico:
 def apply_ai(data):
     changes = []
     for k, v in data.items():
-        if k not in DEFAULTS or v is None or str(v).strip() == "":
+        if k not in DEFAULTS or k in DERIVED_FIELDS or v is None or str(v).strip() == "":
             continue
         if k in {
             "dm2","hta","fa","epoc","sd_metab","tabaco","enolismo","hepato",
@@ -275,13 +382,13 @@ def apply_ai(data):
 
 SHEETS = {
     "01_Datos_Clinicos": [
-        (1,"id_pac"),(2,"fecha_inc"),(3,"edad"),(4,"sexo"),(5,"peso"),(6,"talla"),
+        (1,"id_pac"),(2,"fecha_inc"),(3,"edad"),(4,"sexo"),(5,"peso"),(6,"talla"),(7,"imc"),
         (8,"eti_erc"),(9,"eti_ic"),(10,"dm2"),(11,"hta"),(12,"fa"),(13,"epoc"),
         (14,"sd_metab"),(15,"tabaco"),(16,"enolismo"),(17,"hepato")
     ],
     "02_Analitica_Biomarcadores": [
         (1,"id_pac"),(2,"hb"),(3,"creat"),(4,"cist_c"),(5,"fge"),(6,"urea"),
-        (7,"ac_urico"),(8,"prot_creat"),(9,"ast"),(10,"alt"),(11,"plaq"),
+        (7,"ac_urico"),(8,"prot_creat"),(9,"ast"),(10,"alt"),(11,"plaq"),(12,"fib4"),
         (13,"bili_t"),(14,"bili_d"),(15,"albumina"),(16,"hba1c"),(17,"colest"),
         (18,"nt_probnp"),(19,"ca125"),(20,"gal3"),(21,"sst2"),(22,"gdf15"),
         (23,"biobanco")
@@ -365,8 +472,9 @@ with top1:
 
 with top2:
     if st.button("🔍 Cargar paciente", use_container_width=True):
-        if search_id.strip():
-            if db_load_patient(search_id.strip()):
+        normalized_search = normalize_patient_id(search_id)
+        if normalized_search:
+            if db_load_patient(normalized_search):
                 st.success("Paciente cargado desde la base central.")
                 st.rerun()
             else:
@@ -377,7 +485,17 @@ with top3:
         for k, v in DEFAULTS.items():
             st.session_state[k] = v
         st.session_state.last_ai_data = {}
+        st.session_state.form_mode = "new"
+        st.session_state.loaded_patient_id = ""
+        st.session_state.loaded_updated_at = ""
         st.rerun()
+
+
+mode_label = "EDICIÓN: paciente cargado" if st.session_state.form_mode == "edit" else "NUEVO PACIENTE"
+if st.session_state.form_mode == "edit":
+    st.success(f"🟢 {mode_label} · ID {st.session_state.loaded_patient_id}")
+else:
+    st.info("🔵 NUEVO PACIENTE · una ID que ya exista no podrá sobrescribirse sin cargar primero el paciente")
 
 
 # ============================================================
@@ -419,7 +537,11 @@ with col_der:
 
     with tab1:
         a,b,c,d = st.columns(4)
-        a.text_input("ID Paciente", key="id_pac")
+        a.text_input(
+            "ID Paciente",
+            key="id_pac",
+            help="Identificador único. Se guarda en mayúsculas y sin espacios al principio/final. Para modificar un paciente existente, cárgalo primero."
+        )
         b.text_input("Fecha inclusión", key="fecha_inc")
         c.selectbox("Sexo", ["","H","M"], key="sexo")
         d.text_input("Edad", key="edad")
@@ -427,8 +549,11 @@ with col_der:
         a,b,c,d = st.columns(4)
         a.text_input("Peso (kg)", key="peso")
         b.text_input("Talla (cm)", key="talla")
-        c.selectbox("Etiología ERC", ["","DM2","HTA","Glomerulonefritis","Poliquistosis","Otras"], key="eti_erc")
-        d.selectbox("Etiología IC", ["","Isquémica","Hipertensiva","MCD","HFpEF","Valvular"], key="eti_ic")
+        c.text_input("IMC (calculado)", value=calculate_imc(), disabled=True)
+        d.selectbox("Etiología ERC", ["","DM2","HTA","Glomerulonefritis","Poliquistosis","Otras"], key="eti_erc")
+
+        a,b = st.columns(2)
+        a.selectbox("Etiología IC", ["","Isquémica","Hipertensiva","MCD","HFpEF","Valvular"], key="eti_ic")
 
         st.markdown("**Comorbilidades**")
         a,b,c,d = st.columns(4)
@@ -456,13 +581,14 @@ with col_der:
         a,b,c,d = st.columns(4)
         a.text_input("AST", key="ast")
         b.text_input("ALT", key="alt")
-        c.text_input("Bilirrubina total", key="bili_t")
-        d.text_input("Bilirrubina directa", key="bili_d")
+        c.text_input("FIB-4 (calculado)", value=calculate_fib4(), disabled=True)
+        d.text_input("Bilirrubina total", key="bili_t")
         a,b,c,d = st.columns(4)
-        a.text_input("Albúmina", key="albumina")
-        b.text_input("HbA1c", key="hba1c")
-        c.text_input("Colesterol", key="colest")
-        d.selectbox("Biobanco", BOOLS, key="biobanco")
+        a.text_input("Bilirrubina directa", key="bili_d")
+        b.text_input("Albúmina", key="albumina")
+        c.text_input("HbA1c", key="hba1c")
+        d.text_input("Colesterol", key="colest")
+        st.selectbox("Biobanco", BOOLS, key="biobanco")
         st.markdown("**Biomarcadores**")
         a,b,c,d = st.columns(4)
         a.text_input("NT-proBNP", key="nt_probnp")
@@ -553,14 +679,19 @@ c1,c2,c3 = st.columns(3)
 
 with c1:
     if st.button("💾 GUARDAR EN BASE CENTRAL", type="primary", use_container_width=True):
-        if not st.session_state.id_pac.strip():
+        normalized_id = normalize_patient_id(st.session_state.get("id_pac", ""))
+        st.session_state.id_pac = normalized_id
+
+        if not normalized_id:
             st.error("El ID de paciente es obligatorio.")
         elif warnings:
             st.error("Corrige primero los valores fuera de rango.")
         else:
+            recalculate_derived_fields()
             data = {k: st.session_state.get(k, DEFAULTS[k]) for k in DEFAULTS}
+            data["id_pac"] = normalized_id
             try:
-                ok, mode = db_upsert_patient(data)
+                ok, mode = db_save_patient(data)
                 if ok:
                     st.success(
                         f"Paciente {data['id_pac']} {mode} en la BASE CENTRAL."
@@ -614,6 +745,6 @@ with st.expander("👥 Últimos pacientes modificados"):
         st.caption(f"No se pudo cargar la lista: {e}")
 
 st.caption(
-    "CRD Tesis Cardiorrenal V3 · La base central es la fuente maestra. "
+    "CRD Tesis Cardiorrenal V4 · ID única protegida y la base central es la fuente maestra. "
     "El Excel es una exportación para análisis/copia."
 )
