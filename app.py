@@ -455,11 +455,6 @@ m2.metric("Base central", "SUPABASE")
 m3.metric("Última actualización", last_update[:19].replace("T", " ") if last_update != "—" else "—")
 m4.metric("Estado", "🟢 ONLINE")
 
-st.info(
-    "Esta aplicación utiliza una base central. Cualquier Mac, Windows o navegador "
-    "que entre en esta misma aplicación trabaja sobre los mismos datos."
-)
-
 
 # ============================================================
 # BUSCADOR
@@ -468,17 +463,24 @@ st.info(
 top1, top2, top3 = st.columns([1.5, 1, 1])
 
 with top1:
-    search_id = st.text_input("ID paciente", value=st.session_state.get("id_pac",""))
+    st.text_input(
+        "ID paciente",
+        key="id_pac",
+        help="Esta es la única casilla para introducir la ID. Para editar un paciente existente, escribe su ID y pulsa Cargar paciente."
+    )
 
 with top2:
     if st.button("🔍 Cargar paciente", use_container_width=True):
-        normalized_search = normalize_patient_id(search_id)
+        normalized_search = normalize_patient_id(st.session_state.get("id_pac", ""))
+        st.session_state.id_pac = normalized_search
         if normalized_search:
             if db_load_patient(normalized_search):
                 st.success("Paciente cargado desde la base central.")
                 st.rerun()
             else:
-                st.warning("Ese ID no existe. Puedes crear un paciente nuevo.")
+                st.warning("Ese ID no existe. Pulsa 'Nuevo paciente' para crear una ficha nueva.")
+        else:
+            st.warning("Introduce primero una ID de paciente.")
 
 with top3:
     if st.button("🔄 Nuevo paciente", use_container_width=True):
@@ -494,8 +496,6 @@ with top3:
 mode_label = "EDICIÓN: paciente cargado" if st.session_state.form_mode == "edit" else "NUEVO PACIENTE"
 if st.session_state.form_mode == "edit":
     st.success(f"🟢 {mode_label} · ID {st.session_state.loaded_patient_id}")
-else:
-    st.info("🔵 NUEVO PACIENTE · una ID que ya exista no podrá sobrescribirse sin cargar primero el paciente")
 
 
 # ============================================================
@@ -530,21 +530,17 @@ with col_izq:
 
 with col_der:
     st.subheader("2. Formulario")
+    st.caption("La ID se introduce únicamente en la parte superior. Aquí aparecen solo los datos clínicos.")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "01. Clínicos","02. Analítica","03. Eco/Fibro","04. Tratamiento","05. Seguimiento"
     ])
 
     with tab1:
-        a,b,c,d = st.columns(4)
-        a.text_input(
-            "ID Paciente",
-            key="id_pac",
-            help="Identificador único. Se guarda en mayúsculas y sin espacios al principio/final. Para modificar un paciente existente, cárgalo primero."
-        )
-        b.text_input("Fecha inclusión", key="fecha_inc")
-        c.selectbox("Sexo", ["","H","M"], key="sexo")
-        d.text_input("Edad", key="edad")
+        a,b,c = st.columns(3)
+        a.text_input("Fecha inclusión", key="fecha_inc")
+        b.selectbox("Sexo", ["","H","M"], key="sexo")
+        c.text_input("Edad", key="edad")
 
         a,b,c,d = st.columns(4)
         a.text_input("Peso (kg)", key="peso")
