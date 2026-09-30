@@ -17,7 +17,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# CRD TESIS CARDIORRENAL — V15 ESTABLE
+# CRD TESIS CARDIORRENAL — V17 PERSISTENCIA DE CAMPOS
 # Interfaz clínica + Supabase central + Gemini + Dashboard
 # ============================================================
 
@@ -360,8 +360,10 @@ def _sync_widget_callback(key, extra_callback=None, extra_args=()):
 def persistent_text_input(label, key, disabled=False, container=None, on_change=None, args=None, **kwargs):
     target = container if container is not None else st
     wk = _widget_key(key)
-    if wk not in st.session_state:
-        st.session_state[wk] = st.session_state.get(key, DEFAULTS.get(key, ""))
+    # IMPORTANT: the persistent clinical state is the source of truth.
+    # Re-sync the widget mirror on every rerun BEFORE instantiating the widget.
+    # This fixes stale/blank widgets after loading, saving, or changing sections.
+    st.session_state[wk] = st.session_state.get(key, DEFAULTS.get(key, ""))
     value = target.text_input(
         widget_label(label, key),
         key=wk,
@@ -377,8 +379,7 @@ def persistent_text_input(label, key, disabled=False, container=None, on_change=
 def persistent_text_area(label, key, disabled=False, container=None, on_change=None, args=None, **kwargs):
     target = container if container is not None else st
     wk = _widget_key(key)
-    if wk not in st.session_state:
-        st.session_state[wk] = st.session_state.get(key, "")
+    st.session_state[wk] = st.session_state.get(key, "")
     value = target.text_area(
         widget_label(label, key),
         key=wk,
@@ -398,8 +399,8 @@ def persistent_selectbox(label, key, options, disabled=False, container=None, fo
     if current not in options:
         current = options[0] if options else ""
         st.session_state[key] = current
-    if wk not in st.session_state:
-        st.session_state[wk] = current
+    # Re-sync widget mirror on every rerun from the persistent patient state.
+    st.session_state[wk] = current
     value = target.selectbox(
         widget_label(label, key),
         options,
@@ -417,8 +418,8 @@ def persistent_selectbox(label, key, options, disabled=False, container=None, fo
 def date_input_field(label, key, disabled=False, container=None):
     target = container if container is not None else st
     wk = _date_widget_key(key)
-    if wk not in st.session_state:
-        st.session_state[wk] = parse_date_value(st.session_state.get(key, ""))
+    # Rebuild the date widget from the persistent stored date on every rerun.
+    st.session_state[wk] = parse_date_value(st.session_state.get(key, ""))
     selected = target.date_input(
         widget_label(label, key),
         key=wk,
